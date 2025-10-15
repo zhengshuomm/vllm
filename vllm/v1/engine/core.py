@@ -792,7 +792,15 @@ class EngineCoreProc(EngineCore):
         pass
 
     def run_busy_loop(self):
-        """Core busy loop of the EngineCore."""
+        """
+        EngineCore 的核心忙循环
+
+        中文说明:
+        - 持续运行主循环，直到进程被 SIGINT 或 SIGTERM 终止。
+        - 每次循环包含两步：
+          1) 处理输入队列中的客户端请求（直到需要执行一次引擎 step）。
+          2) 执行一次引擎 step（调度/执行/产出）。
+        """
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
@@ -802,7 +810,17 @@ class EngineCoreProc(EngineCore):
             self._process_engine_step()
 
     def _process_input_queue(self):
-        """Exits when an engine step needs to be performed."""
+        """
+        当需要执行一次引擎 step 时返回
+
+        中文说明:
+        - 阻塞地从 `input_queue` 读取客户端请求，并按类型进行处理。
+        - 当满足任一条件时退出阻塞等待：
+          * 当前处于运行状态（engines_running）。
+          * 调度器中已有待处理请求（scheduler.has_requests()）。
+          * 批处理队列已存在（batch_queue）。
+        - 退出等待后，继续无阻塞清空队列中剩余的请求，确保延迟最小化。
+        """
 
         waited = False
         while (
@@ -825,7 +843,15 @@ class EngineCoreProc(EngineCore):
             self._handle_client_request(*req)
 
     def _process_engine_step(self) -> bool:
-        """Called only when there are unfinished local requests."""
+        """
+        仅在存在未完成的本地请求时调用
+
+        中文说明:
+        - 调用 step 函数（可能是带批队列的版本），获取本次执行的输出以及是否执行了模型。
+        - 将输出放入输出队列，供前端消费。
+        - 执行 post_step 钩子（例如推测解码的草稿token更新）。
+        - 返回本轮是否执行了模型（用于 DP 波次控制等逻辑）。
+        """
 
         # Step the engine core.
         outputs, model_executed = self.step_fn()
@@ -840,7 +866,17 @@ class EngineCoreProc(EngineCore):
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
-        """Dispatch request from client."""
+        """
+        分发并处理来自客户端的请求
+
+        中文说明:
+        - 根据 `request_type` 将请求路由到对应的处理逻辑：
+          * ADD: 预处理后加入调度器。
+          * ABORT: 终止请求。
+          * UTILITY: 调用工具/查询类方法，并将结果以 UtilityOutput 形式回传。
+          * EXECUTOR_FAILED: 抛出错误以触发上层容错处理。
+        - 任何未识别的请求类型都会被记录为错误日志。
+        """
 
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
@@ -871,8 +907,13 @@ class EngineCoreProc(EngineCore):
 
     @staticmethod
     def _convert_msgspec_args(method, args):
-        """If a provided arg type doesn't match corresponding target method
-        arg type, try converting to msgspec object."""
+        """
+        将入参按目标方法签名转换为 msgspec 对象（若需要）
+
+        中文说明:
+        - 若传入的参数类型与目标方法的注解类型（且为 msgspec.Struct 子类）不匹配，
+          则尝试使用 msgspec.convert 进行类型转换，以确保反序列化后的对象类型正确。
+        """
         if not args:
             return args
         arg_types = signature(method).parameters.values()
@@ -887,7 +928,13 @@ class EngineCoreProc(EngineCore):
         )
 
     def _send_engine_dead(self):
-        """Send EngineDead status to the EngineCoreClient."""
+        """
+        向 EngineCoreClient 发送引擎死亡（EngineDead）状态
+
+        中文说明:
+        - 向输出队列发送特殊标记（ENGINE_CORE_DEAD），提示前端引擎已终止。
+        - 等待输出线程在关闭前将消息成功发送，若失败则记录致命日志。
+        """
 
         # Put ENGINE_CORE_DEAD in the queue.
         self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
@@ -907,7 +954,17 @@ class EngineCoreProc(EngineCore):
         identity: bytes,
         ready_event: threading.Event,
     ):
-        """Input socket IO thread."""
+        """
+        输入 Socket 的 IO 线程
+
+        中文说明:
+        - 将来自前端/协调器的 ZMQ 输入数据解码后入队到 `input_queue`，
+          以便核心忙循环消费。
+        - 对 ADD 请求使用专用的结构化解码器（MsgpackDecoder(EngineCoreRequest)），
+          以避免重复拷贝并提升吞吐。
+        - 在 DP 协调器模式下，首先等待来自协调器的 READY 消息，再开始轮询所有输入 socket。
+        - 采用 Poller 复用多个 socket，避免阻塞并充分利用 I/O。
+        """
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
@@ -975,7 +1032,16 @@ class EngineCoreProc(EngineCore):
         coord_output_path: Optional[str],
         engine_index: int,
     ):
-        """Output socket IO thread."""
+        """
+        输出 Socket 的 IO 线程
+
+        中文说明:
+        - 将 `output_queue` 中的 EngineCoreOutputs 进行 msgpack 编码并通过 ZMQ 发送给前端。
+        - 复用发送缓冲区（reuse_buffers）降低内存分配开销，并使用 MessageTracker
+          跟踪 ZMQ 零拷贝发送的完成状态，避免过早释放底层缓冲区。
+        - 对于协调器消息（client_index == -1）不复用缓冲，因为体积很小。
+        - 接收到 ENGINE_CORE_DEAD 标记时，广播并正常退出线程。
+        """
 
         # Msgpack serialization encoding.
         encoder = MsgpackEncoder()
