@@ -2961,9 +2961,16 @@ def run_method(
     cloudpickle.
     If the method is a callable, it will be called directly.
     """
+    # 情况1：method 是序列化后的可调用对象（bytes）
+    # - 使用 cloudpickle 反序列化得到可调用对象
+    # - 通过 functools.partial 先把 obj 绑定为第一个参数，形成实例方法调用形态
+    #   相当于后续调用 func(*args, **kwargs) 等价于 call(obj, *args, **kwargs)
     if isinstance(method, bytes):
         func = partial(cloudpickle.loads(method), obj)
     elif isinstance(method, str):
+        # 情况2：method 是方法名字符串
+        # - 通过 getattr 在对象上查找同名实例方法
+        # - 如果不存在，抛出 NotImplementedError 以提示调用方该方法未实现
         try:
             func = getattr(obj, method)
         except AttributeError:
@@ -2971,6 +2978,8 @@ def run_method(
                 f"Method {method!r} is not implemented."
             ) from None
     else:
+        # 情况3：method 是可调用对象（callable）
+        # - 使用 partial 绑定 obj 作为第一个参数，统一为实例方法调用形态
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
 

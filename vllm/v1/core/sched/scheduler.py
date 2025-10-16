@@ -231,11 +231,17 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()  # 调度时间戳
 
         # ==================== 第一步：调度运行中的请求 ====================
+        # 注意：这里会混合调度prefill和decode请求
+        # - prefill请求：num_computed_tokens=0，需要处理整个prompt
+        # - decode请求：num_computed_tokens>0，只需要生成下一个token
+        # 这种混合调度可以提高GPU利用率和吞吐量
         req_index = 0  # 请求索引
         while req_index < len(self.running) and token_budget > 0:  # 遍历运行中的请求
             request = self.running[req_index]  # 获取当前请求
 
             # ==================== 计算需要调度的新token数 ====================
+            # 对于prefill请求：num_new_tokens = prompt长度
+            # 对于decode请求：num_new_tokens = 1（生成下一个token）
             num_new_tokens = (
                 request.num_tokens_with_spec  # 带推测的token数
                 + request.num_output_placeholders  # 输出占位符数
@@ -335,6 +341,11 @@ class Scheduler(SchedulerInterface):
 
             # ==================== 推测解码相关 ====================
             if request.spec_token_ids:  # 如果有推测token
+                # 计算在当前调度步骤中需要处理的推测token数量
+                # num_new_tokens: 当前步骤要调度的总token数（包括推测token）
+                # request.num_computed_tokens: 已经计算完成的token数（不包括推测token）
+                # request.num_tokens: 实际token数（prompt + output，不包括推测token）
+                # 公式含义：总调度token数 + 已计算token数 - 实际token数 = 推测token数
                 num_scheduled_spec_tokens = (
                     num_new_tokens + request.num_computed_tokens - request.num_tokens  # 计算调度的推测token数
                 )
@@ -417,18 +428,20 @@ class Scheduler(SchedulerInterface):
                     continue  # 继续下一个请求
 
                 # ==================== 初始化变量 ====================
-                num_external_computed_tokens = 0  # 外部计算的token数
-                load_kv_async = False  # 是否异步加载KV
+                num_external_computed_tokens = 0  # 外部计算的token数（通过KVConnector从其他节点获取的已计算token数）
+                load_kv_async = False  # 是否异步加载KV（是否需要在后台异步加载KV缓存）
 
                 # ==================== 获取已缓存的token ====================
                 if request.num_computed_tokens == 0:  # 如果已计算token数为0
-                    # 获取本地缓存的token
+                    # 获取本地缓存的token（从当前节点的KV缓存中获取已计算的token）
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)  # 获取已计算块
                     )
 
                     # ==================== 如果使用KVConnector，获取外部缓存的token ====================
                     if self.connector is not None:  # 如果有连接器
+                        # 通过KVConnector从其他节点（如prefill节点）获取已计算的token数
+                        # 这在分布式推理中很常见，prefill节点计算token，decode节点使用结果
                         num_external_computed_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(  # 获取匹配的token数
                                 request, num_new_local_computed_tokens
@@ -442,6 +455,7 @@ class Scheduler(SchedulerInterface):
                             continue  # 继续下一个请求
 
                     # 总计算token数（本地+外部）
+                    # 本地计算的token数 + 外部节点计算的token数 = 总的已计算token数
                     num_computed_tokens = (
                         num_new_local_computed_tokens + num_external_computed_tokens  # 计算总token数
                     )
@@ -609,10 +623,14 @@ class Scheduler(SchedulerInterface):
         ) <= len(self.running)
 
         # ==================== 获取运行队列中所有请求的最长公共前缀 ====================
-        # 这可以用于级联注意力
+        # 这可以用于级联注意力（Cascade Attention）优化
+        # 级联注意力是一种优化技术，当多个请求有相同的token前缀时，
+        # 可以共享计算这些公共前缀的注意力，提高计算效率
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)  # 初始化公共前缀块数
         if self.running:  # 如果有运行中的请求
-            any_request = self.running[0]  # 获取任意一个请求
+            any_request = self.running[0]  # 获取任意一个请求作为参考
+            # 计算所有运行中请求共享的KV缓存块数量
+            # 这些共享的块代表请求之间的公共token前缀
             num_common_prefix_blocks = (
                 self.kv_cache_manager.get_num_common_prefix_blocks(  # 获取公共前缀块数
                     any_request.request_id
@@ -1554,7 +1572,7 @@ class Scheduler(SchedulerInterface):
         Args:
             request: 等待远程KV的请求
             
-        Returns:
+        Returns: 
             bool: 是否准备就绪
         """
         assert self.connector is not None  # 确保连接器存在

@@ -453,49 +453,76 @@ class Worker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+        # 初始化中间张量，用于流水线并行中的层间通信
         intermediate_tensors = None
+        
+        # 判断是否需要进行前向传播（当有调度到的token数量大于0时）
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        
+        # 获取本次调度到的token总数
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        
+        # 计算输入token数量（可能包括前缀缓存等）
         num_input_tokens = self.model_runner._get_num_input_tokens(num_scheduled_tokens)
+        
+        # 配置需要收集的张量类型，residual表示残差连接
+        # 根据配置和输入token数量决定是否需要收集residual张量
         all_gather_tensors = {
             "residual": not is_residual_scattered_for_sp(
                 self.vllm_config, num_input_tokens
             )
         }
+        
+        # 如果需要进行前向传播且当前不是流水线并行的第一个rank
+        # 则需要从上一个rank接收中间张量
         if forward_pass and not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group(),
-                    all_gather_tensors=all_gather_tensors,
+                    all_gather_group=get_tp_group(),  # 使用张量并行组进行通信
+                    all_gather_tensors=all_gather_tensors,  # 指定需要收集的张量类型
                 )
             )
 
+        # 执行模型推理，传入调度输出和中间张量
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        
+        # 如果输出是最终结果（ModelRunnerOutput或AsyncModelRunnerOutput），直接返回
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
             return output
 
+        # 确保输出是中间张量类型（用于流水线并行）
         assert isinstance(output, IntermediateTensors)
+        
+        # 获取并行配置
         parallel_config = self.vllm_config.parallel_config
+        
+        # 确保不是外部启动器且不是流水线并行的最后一个rank
+        # 这样才需要将中间结果传递给下一个rank
         assert (
             parallel_config.distributed_executor_backend != ("external_launcher")
             and not get_pp_group().is_last_rank
         )
 
+        # 将中间张量发送给下一个流水线并行的rank
         get_pp_group().send_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-            all_gather_tensors=all_gather_tensors,
+            output.tensors,  # 要发送的张量字典
+            all_gather_group=get_tp_group(),  # 使用张量并行组进行通信
+            all_gather_tensors=all_gather_tensors,  # 指定需要收集的张量类型
         )
 
+        # 获取KV缓存连接器输出（用于KV缓存的传输）
         kv_connector_output = output.kv_connector_output
+        
+        # 如果没有KV连接器输出，返回None
         if not kv_connector_output:
             return None
 
-        # In case of PP with kv transfer, we need to pass through the
-        # kv_connector_output
+        # 在流水线并行与KV传输结合的情况下，需要传递KV连接器输出
+        # 如果KV连接器输出为空，返回空的模型运行器输出
         if kv_connector_output.is_empty():
             return EMPTY_MODEL_RUNNER_OUTPUT
 
+        # 创建空的模型运行器输出副本，并设置KV连接器输出
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
         return output
