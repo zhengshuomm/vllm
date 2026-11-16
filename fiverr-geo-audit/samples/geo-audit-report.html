@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GEO &amp; AI Search Visibility Audit — Linear</title>
+  <style>
+    :root {
+      --ink: #0f172a;
+      --muted: #475569;
+      --border: #e2e8f0;
+      --surface: #ffffff;
+      --bg: #f8fafc;
+      --accent: #2563eb;
+      --accent-soft: #eff6ff;
+      --green: #15803d;
+      --green-bg: #dcfce7;
+      --amber: #b45309;
+      --amber-bg: #fef3c7;
+      --red: #b91c1c;
+      --red-bg: #fee2e2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.55;
+      font-size: 14px;
+    }
+    .page {
+      max-width: 980px;
+      margin: 28px auto;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, .06);
+    }
+    .hero {
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 65%, #1d4ed8 100%);
+      color: #fff;
+      padding: 36px 40px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 28px;
+      flex-wrap: wrap;
+    }
+    .hero > div:first-child { flex: 1 1 360px; min-width: 0; }
+    .hero .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      font-size: 11px;
+      font-weight: 700;
+      color: #93c5fd;
+      margin-bottom: 8px;
+    }
+    .hero h1 { margin: 0 0 6px; font-size: 28px; line-height: 1.2; }
+    .hero .meta { color: #cbd5e1; font-size: 13px; }
+    .hero .meta a { color: #bfdbfe; text-decoration: none; }
+    .gauge {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.16);
+      padding: 14px 20px;
+      border-radius: 12px;
+    }
+    .gauge-text .grade { font-size: 13px; color: #cbd5e1; }
+    .gauge-text .big { font-size: 24px; font-weight: 700; }
+    .content { padding: 32px 40px 44px; }
+    h2 {
+      font-size: 18px;
+      margin: 30px 0 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    h2:first-child { margin-top: 0; }
+    .section-num {
+      display: inline-grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .summary-list {
+      margin: 0;
+      padding: 16px 20px 16px 36px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .summary-list li { margin-bottom: 6px; }
+    .summary-list li:last-child { margin-bottom: 0; }
+    .pillars {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-top: 16px;
+    }
+    .pillar {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      background: #fff;
+    }
+    .pillar .name { font-size: 12px; color: var(--muted); font-weight: 600; }
+    .pillar .score { font-size: 22px; font-weight: 700; margin: 4px 0 8px; }
+    .pillar .score span { font-size: 13px; color: var(--muted); font-weight: 500; }
+    .bar { height: 7px; border-radius: 99px; background: #e2e8f0; overflow: hidden; }
+    .bar > div { height: 100%; border-radius: 99px; }
+    .stats-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin: 14px 0;
+    }
+    .stat-box {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: var(--bg);
+    }
+    .stat-box .k { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; }
+    .stat-box .v { font-size: 16px; font-weight: 700; margin-top: 2px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+    th, td { padding: 9px 12px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { background: #f8fafc; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      background: #f1f5f9;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    td:first-child code { white-space: nowrap; }
+    pre {
+      margin: 8px 0 18px;
+      padding: 14px 16px;
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .pill {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 99px;
+      font-size: 11.5px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .pill-green { background: var(--green-bg); color: var(--green); }
+    .pill-blue { background: var(--accent-soft); color: var(--accent); }
+    .pill-amber { background: var(--amber-bg); color: var(--amber); }
+    .pill-red { background: var(--red-bg); color: var(--red); }
+    .finding {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 10px;
+      background: #fff;
+    }
+    .finding-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+      flex-wrap: wrap;
+    }
+    .finding-title { font-weight: 700; font-size: 14.5px; }
+    .finding-pillar { font-size: 12px; color: var(--muted); margin-left: auto; }
+    .finding p { margin: 4px 0; color: var(--muted); font-size: 13px; }
+    .finding p strong { color: var(--ink); }
+    .fix-label {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 650;
+      margin-top: 14px;
+    }
+    .fix-label span { font-size: 12px; color: var(--muted); font-weight: 400; }
+    .footer {
+      border-top: 1px solid var(--border);
+      padding: 18px 40px;
+      background: #f8fafc;
+      color: var(--muted);
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .print-bar {
+      max-width: 980px;
+      margin: 16px auto 0;
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .print-btn {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .print-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    @media (max-width: 760px) {
+      .pillars, .stats-strip { grid-template-columns: repeat(2, 1fr); }
+      .hero, .content { padding: 24px 20px; }
+    }
+    @media print {
+      body { background: #fff; }
+      .print-bar { display: none; }
+      .page { margin: 0; border: 0; box-shadow: none; border-radius: 0; max-width: 100%; }
+      .finding, pre, table { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="print-bar">
+    <button class="print-btn primary" onclick="window.print()">Print / Save as PDF</button>
+  </div>
+  <div class="page">
+    <header class="hero">
+      <div>
+        <div class="eyebrow">Generative Engine Optimization (GEO / AEO) Audit</div>
+        <h1>Linear</h1>
+        <div class="meta">
+          Audited URL: <a href="https://linear.app/">https://linear.app/</a>
+           &middot; Industry: B2B Software Issue Tracking
+          &middot; Date: 2026-11-16
+        </div>
+      </div>
+      <div class="gauge">
+        <svg width="128" height="128" viewBox="0 0 128 128" aria-label="GEO Score 65 out of 100">
+          <circle cx="64" cy="64" r="54" fill="none" stroke="rgba(255,255,255,.16)" stroke-width="11"/>
+          <circle cx="64" cy="64" r="54" fill="none" stroke="#b45309" stroke-width="11"
+            stroke-linecap="round" stroke-dasharray="339.29" stroke-dashoffset="118.75"
+            transform="rotate(-90 64 64)"/>
+          <text x="64" y="61" text-anchor="middle" fill="#fff" font-size="30" font-weight="700">65</text>
+          <text x="64" y="80" text-anchor="middle" fill="#cbd5e1" font-size="12">/ 100</text>
+        </svg>
+        <div class="gauge-text">
+          <div class="grade">Readiness Grade</div>
+          <div class="big">Grade C</div>
+          <div class="grade">1 Critical &middot; 2 High &middot; 4 Medium</div>
+        </div>
+      </div>
+    </header>
+
+    <main class="content">
+      <h2><span class="section-num">1</span> Executive Summary &amp; Pillar Scores</h2>
+      <ul class="summary-list">
+        <li><strong>Overall GEO Readiness:</strong> Linear scored <strong>65/100 (Grade C)</strong> across 4 technical AI-search pillars.</li>
+        <li><strong>AI Crawler Access:</strong> Major AI retrieval bots are currently not blocked in <code>robots.txt</code>.</li>
+        <li><strong>AI Manifest:</strong> <code>/llms.txt</code> is live (178 structured links detected).</li>
+        <li><strong>Structured Data Gap:</strong> No valid Schema.org JSON-LD blocks detected; a ready-to-paste snippet is included in Section 5.</li>
+        <li><strong>SSR Extractability:</strong> 1,628 extractable words parsed cleanly from initial HTML (285ms).</li>
+      </ul>
+
+      <div class="pillars">
+        <div class="pillar">
+            <div class="name">AI Crawler Access</div>
+            <div class="score">22 <span>/ 25 (88%)</span></div>
+            <div class="bar"><div style="width:88%;background:#15803d"></div></div>
+          </div>
+        <div class="pillar">
+            <div class="name">AI-Native Discovery</div>
+            <div class="score">18 <span>/ 20 (90%)</span></div>
+            <div class="bar"><div style="width:90%;background:#15803d"></div></div>
+          </div>
+        <div class="pillar">
+            <div class="name">Structured Data &amp; Entity</div>
+            <div class="score">9 <span>/ 30 (30%)</span></div>
+            <div class="bar"><div style="width:30%;background:#b91c1c"></div></div>
+          </div>
+        <div class="pillar">
+            <div class="name">Content Extractability &amp; SSR</div>
+            <div class="score">16 <span>/ 25 (64%)</span></div>
+            <div class="bar"><div style="width:64%;background:#b45309"></div></div>
+          </div>
+      </div>
+
+      <h2><span class="section-num">2</span> AI Crawler Access Matrix (robots.txt)</h2>
+      <p style="margin:0 0 8px;color:var(--muted)">
+        Status of major AI retrieval and indexing crawlers against <code>https://linear.app/robots.txt</code>
+        (file detected).
+      </p>
+      <table>
+        <thead>
+          <tr><th>Crawler</th><th>Platform</th><th>Purpose</th><th>Access</th><th>Matched Rule</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>GPTBot</code></td>
+            <td>OpenAI</td>
+            <td>ChatGPT training &amp; crawl</td>
+            <td><span class="pill pill-blue">Allowed (Default)</span></td>
+            <td><code>None (implicit allow)</code></td>
+          </tr>
+          <tr>
+            <td><code>OAI-SearchBot</code></td>
+            <td>OpenAI</td>
+            <td>ChatGPT Search indexing</td>
+            <td><span class="pill pill-blue">Allowed (Default)</span></td>
+            <td><code>None (implicit allow)</code></td>
+          </tr>
+          <tr>
+            <td><code>ChatGPT-User</code></td>
+            <td>OpenAI</td>
+            <td>ChatGPT live user browsing</td>
+            <td><span class="pill pill-blue">Allowed (Default)</span></td>
+            <td><code>None (implicit allow)</code></td>
+          </tr>
+          <tr>
+            <td><code>PerplexityBot</code></td>
+            <td>Perplexity</td>
+            <td>Perplexity AI Search indexing</td>
+            <td><span class="pill pill-blue">Allowed (Default)</span></td>
+            <td><code>None (implicit allow)</code></td>
+          </tr>
+          <tr>
+            <td><code>ClaudeBot</code></td>
+            <td>Anthropic</td>
+            <td>Claude web retrieval</td>
+            <td><span class="pill pill-blue">Allowed (Default)</span></td>
+            <td><code>None (implicit allow)</code></td>
+          </tr>
+          <tr>
+            <td><code>Google-Extended</code></td>
+            <td>Google</td>
+            <td>Gemini grounding &amp; training</td>
+            <td><span class="pill pill-blue">Allowed (Default)</span></td>
+            <td><code>None (implicit allow)</code></td>
+          </tr>
+          <tr>
+            <td><code>Googlebot</code></td>
+            <td>Google</td>
+            <td>Google Search &amp; AI Overviews</td>
+            <td><span class="pill pill-blue">Allowed (Default)</span></td>
+            <td><code>None (implicit allow)</code></td>
+          </tr>
+          <tr>
+            <td><code>Applebot-Extended</code></td>
+            <td>Apple</td>
+            <td>Apple Intelligence</td>
+            <td><span class="pill pill-blue">Allowed (Default)</span></td>
+            <td><code>None (implicit allow)</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2><span class="section-num">3</span> Technical Snapshot (Discovery, Schema &amp; SSR)</h2>
+      <div class="stats-strip">
+        <div class="stat-box"><div class="k">/llms.txt</div><div class="v">Present (178 links)</div></div>
+        <div class="stat-box"><div class="k">/llms-full.txt</div><div class="v">Missing</div></div>
+        <div class="stat-box"><div class="k">XML Sitemap</div><div class="v">Present (1017 URLs)</div></div>
+        <div class="stat-box"><div class="k">Extractable Text</div><div class="v">1,628 words</div></div>
+      </div>
+      <table>
+        <thead><tr><th>Check</th><th>Observed Value</th><th>GEO Implication</th></tr></thead>
+        <tbody>
+          <tr><td>Page Title</td><td>Linear – The system for product development</td><td>43 chars</td></tr>
+          <tr><td>Meta Description</td><td>Purpose-built for planning and building products with AI agents.</td><td>64 chars</td></tr>
+          <tr><td>Canonical URL</td><td><code>https://linear.app</code></td><td>Consolidates citation authority</td></tr>
+          <tr><td>JSON-LD Schemas</td><td><code>None</code></td><td>0 block(s), 0 invalid</td></tr>
+          <tr><td>Heading Structure</td><td>H1: 1 &middot; H2: 7 &middot; H3: 7</td><td>0 question-style heading(s)</td></tr>
+          <tr><td>Rendering Mode</td><td>Server-Readable HTML</td><td>Text/HTML ratio: 0.8% &middot; HTTP 200 (285ms)</td></tr>
+          <tr><td>Entity Profiles</td><td>3 official profile link(s)</td><td>Add concrete metrics / benchmarks</td></tr>
+        </tbody>
+      </table>
+
+      <h2><span class="section-num">4</span> Prioritized Action Roadmap</h2>
+      <div class="finding">
+            <div class="finding-head">
+              <span class="pill pill-red">P0 · Critical</span>
+              <span class="finding-title">No Schema.org JSON-LD structured data detected</span>
+              <span class="finding-pillar">Structured Data</span>
+            </div>
+            <p><strong>Impact:</strong> Without JSON-LD, AI engines must guess your entity name, category, pricing, and official profiles from unstructured HTML.</p>
+            <p><strong>Recommended Fix:</strong> Paste the ready-to-deploy schema-jsonld.html snippet into your homepage &lt;head&gt;.</p>
+          </div>
+      <div class="finding">
+            <div class="finding-head">
+              <span class="pill pill-amber">P1 · High</span>
+              <span class="finding-title">Missing FAQPage Schema markup</span>
+              <span class="finding-pillar">Structured Data</span>
+            </div>
+            <p><strong>Impact:</strong> Conversational queries in ChatGPT and Perplexity map directly to structured Question/Answer pairs.</p>
+            <p><strong>Recommended Fix:</strong> Add a 5–8 question FAQ section backed by the included FAQPage JSON-LD block.</p>
+          </div>
+      <div class="finding">
+            <div class="finding-head">
+              <span class="pill pill-amber">P1 · High</span>
+              <span class="finding-title">Few or no conversational question-style headings</span>
+              <span class="finding-pillar">Content Extractability</span>
+            </div>
+            <p><strong>Impact:</strong> AI search queries are phrased as natural questions (&quot;How does X compare to Y?&quot;, &quot;What does X cost?&quot;).</p>
+            <p><strong>Recommended Fix:</strong> Rewrite key H2/H3 headings as direct buyer questions with a 40–60 word direct answer immediately underneath.</p>
+          </div>
+      <div class="finding">
+            <div class="finding-head">
+              <span class="pill pill-blue">P2 · Medium</span>
+              <span class="finding-title">No explicit AI User-Agent directives in robots.txt</span>
+              <span class="finding-pillar">AI Crawler Access</span>
+            </div>
+            <p><strong>Impact:</strong> Relying only on wildcard rules leaves AI crawler permissions ambiguous when security teams or CDNs update rules.</p>
+            <p><strong>Recommended Fix:</strong> Add explicit Allow blocks for GPTBot, OAI-SearchBot, PerplexityBot, ClaudeBot, and Google-Extended.</p>
+          </div>
+      <div class="finding">
+            <div class="finding-head">
+              <span class="pill pill-blue">P2 · Medium</span>
+              <span class="finding-title">No /llms-full.txt deep context file</span>
+              <span class="finding-pillar">AI Discovery</span>
+            </div>
+            <p><strong>Impact:</strong> Technical or B2B buyers benefit when AI assistants can read consolidated product docs in one fetch.</p>
+            <p><strong>Recommended Fix:</strong> Optionally publish /llms-full.txt consolidating key product specs, pricing, and FAQ answers in clean markdown.</p>
+          </div>
+      <div class="finding">
+            <div class="finding-head">
+              <span class="pill pill-blue">P2 · Medium</span>
+              <span class="finding-title">Limited concrete numbers or verifiable statistics in copy</span>
+              <span class="finding-pillar">Content Extractability</span>
+            </div>
+            <p><strong>Impact:</strong> GEO research shows LLMs strongly prefer citing pages that contain concrete figures, benchmarks, and transparent pricing.</p>
+            <p><strong>Recommended Fix:</strong> Include concrete metrics (customer count, latency/speed savings, SLA numbers, or transparent pricing tiers).</p>
+          </div>
+      <div class="finding">
+            <div class="finding-head">
+              <span class="pill pill-blue">P2 · Medium</span>
+              <span class="finding-title">Missing freshness / authorship signals (dateModified / author)</span>
+              <span class="finding-pillar">Content Extractability</span>
+            </div>
+            <p><strong>Impact:</strong> AI engines prioritize recently updated and attributed content when choosing citations.</p>
+            <p><strong>Recommended Fix:</strong> Expose `datePublished`, `dateModified`, and named expert authors on articles and comparison guides.</p>
+          </div>
+
+      <h2><span class="section-num">5</span> Ready-to-Deploy Code Fixes</h2>
+      <div class="fix-label"><div>A. Tailored <code>/llms.txt</code> Manifest</div><span>Upload to site root: https://linear.app/llms.txt</span></div>
+      <pre># Linear
+
+&gt; Purpose-built for planning and building products with AI agents.
+
+## Core Pages
+- [Customers](https://linear.app/customers): Key information on customers.
+- [Pricing](https://linear.app/pricing): Key information on pricing.
+- [Now](https://linear.app/now): Key information on now.
+- [Contact](https://linear.app/contact): Key information on contact.
+- [Docs](https://linear.app/docs): Key information on docs.
+- [Open app](https://linear.app/login): Key information on open app.
+- [Sign up](https://linear.app/signup): Key information on sign up.
+- [New Loops →](https://linear.app/now/introducing-loops): Key information on new loops →.
+- [Learn more →](https://linear.app/intake): Key information on learn more →.
+- [Learn more →](https://linear.app/plan): Key information on learn more →.
+- [Learn more →](https://linear.app/ai): Key information on learn more →.
+- [Learn more →](https://linear.app/build): Key information on learn more →.
+
+## Key Facts for AI Assistants
+- Official Website: https://linear.app
+- Primary Category: B2B Software Issue Tracking
+- Official Profiles: https://x.com/linear, https://github.com/linear, https://www.youtube.com/@linear
+
+## Contact &amp; Citation
+- Preferred citation name: Linear
+- Canonical URL: https://linear.app
+</pre>
+
+      <div class="fix-label"><div>B. <code>robots.txt</code> AI Crawler Patch</div><span>Append or merge into /robots.txt</span></div>
+      <pre># === AI Search &amp; Retrieval Crawler Access (Linear) ===
+# Explicitly allow major AI search &amp; citation bots on public content.
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Googlebot
+Allow: /
+
+Sitemap: https://linear.app/sitemap.xml
+</pre>
+
+      <div class="fix-label"><div>C. Schema.org JSON-LD (Organization + WebSite + FAQPage)</div><span>Paste inside homepage &lt;head&gt;</span></div>
+      <pre>&lt;!-- Paste inside &lt;head&gt; on https://linear.app --&gt;
+&lt;script type=&quot;application/ld+json&quot;&gt;
+{
+  &quot;@context&quot;: &quot;https://schema.org&quot;,
+  &quot;@graph&quot;: [
+    {
+      &quot;@type&quot;: &quot;Organization&quot;,
+      &quot;@id&quot;: &quot;https://linear.app/#organization&quot;,
+      &quot;name&quot;: &quot;Linear&quot;,
+      &quot;url&quot;: &quot;https://linear.app&quot;,
+      &quot;description&quot;: &quot;Purpose-built for planning and building products with AI agents.&quot;,
+      &quot;logo&quot;: &quot;https://linear.app/api/og/main?title=Linear&amp;v=4&quot;,
+      &quot;sameAs&quot;: [
+        &quot;https://x.com/linear&quot;,
+        &quot;https://github.com/linear&quot;,
+        &quot;https://www.youtube.com/@linear&quot;
+      ]
+    },
+    {
+      &quot;@type&quot;: &quot;WebSite&quot;,
+      &quot;@id&quot;: &quot;https://linear.app/#website&quot;,
+      &quot;url&quot;: &quot;https://linear.app&quot;,
+      &quot;name&quot;: &quot;Linear&quot;,
+      &quot;publisher&quot;: {
+        &quot;@id&quot;: &quot;https://linear.app/#organization&quot;
+      }
+    },
+    {
+      &quot;@type&quot;: &quot;FAQPage&quot;,
+      &quot;mainEntity&quot;: [
+        {
+          &quot;@type&quot;: &quot;Question&quot;,
+          &quot;name&quot;: &quot;What is Linear?&quot;,
+          &quot;acceptedAnswer&quot;: {
+            &quot;@type&quot;: &quot;Answer&quot;,
+            &quot;text&quot;: &quot;Purpose-built for planning and building products with AI agents.&quot;
+          }
+        },
+        {
+          &quot;@type&quot;: &quot;Question&quot;,
+          &quot;name&quot;: &quot;Who is Linear best suited for?&quot;,
+          &quot;acceptedAnswer&quot;: {
+            &quot;@type&quot;: &quot;Answer&quot;,
+            &quot;text&quot;: &quot;[Replace with a concrete 2-sentence description of Linear&#39;s ideal customer profile and primary use cases in B2B Software Issue Tracking.]&quot;
+          }
+        },
+        {
+          &quot;@type&quot;: &quot;Question&quot;,
+          &quot;name&quot;: &quot;How does Linear pricing work?&quot;,
+          &quot;acceptedAnswer&quot;: {
+            &quot;@type&quot;: &quot;Answer&quot;,
+            &quot;text&quot;: &quot;[Replace with transparent starting price, billing model, or free trial details for Linear.]&quot;
+          }
+        }
+      ]
+    }
+  ]
+}
+&lt;/script&gt;
+</pre>
+
+      <h2><span class="section-num">6</span> 20-Prompt AI Search Visibility Benchmark</h2>
+      <p style="margin:0 0 8px;color:var(--muted)">
+        Track how often <strong>Linear</strong> is cited vs competitors across ChatGPT Search, Perplexity, Gemini, and Claude.
+        Score 0 (absent) to 3 (top-3 linked recommendation).
+      </p>
+      <table>
+        <thead>
+          <tr><th>#</th><th>Intent</th><th>Buyer Prompt</th><th>ChatGPT</th><th>Perplexity</th><th>Gemini</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td><span class="pill pill-blue">Category Discovery</span></td>
+            <td>What are the best B2B Software Issue Tracking tools or providers in 2026?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td><span class="pill pill-blue">Category Discovery</span></td>
+            <td>Top 5 B2B Software Issue Tracking solutions for growing teams and their pros and cons.</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td><span class="pill pill-blue">Category Discovery</span></td>
+            <td>Which B2B Software Issue Tracking platform offers the best ROI for small to mid-sized businesses?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td><span class="pill pill-blue">Category Discovery</span></td>
+            <td>Recommend a reliable B2B Software Issue Tracking solution with transparent pricing.</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>5</td>
+            <td><span class="pill pill-blue">Category Discovery</span></td>
+            <td>What should buyers look for when choosing a B2B Software Issue Tracking provider?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>6</td>
+            <td><span class="pill pill-blue">Problem / Intent</span></td>
+            <td>How do I solve [primary customer pain point] using B2B Software Issue Tracking?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>7</td>
+            <td><span class="pill pill-blue">Problem / Intent</span></td>
+            <td>Fastest way to set up B2B Software Issue Tracking without a large engineering team?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>8</td>
+            <td><span class="pill pill-blue">Problem / Intent</span></td>
+            <td>Best B2B Software Issue Tracking options for startups vs enterprise companies.</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>9</td>
+            <td><span class="pill pill-blue">Problem / Intent</span></td>
+            <td>Which B2B Software Issue Tracking vendors have the strongest integrations and API support?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>10</td>
+            <td><span class="pill pill-blue">Problem / Intent</span></td>
+            <td>What are the hidden costs or common pitfalls when adopting B2B Software Issue Tracking?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>11</td>
+            <td><span class="pill pill-blue">Competitor Comparison</span></td>
+            <td>What are the best alternatives to Jira?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>12</td>
+            <td><span class="pill pill-blue">Competitor Comparison</span></td>
+            <td>Compare Linear vs Jira: features, pricing, and who each is best for.</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>13</td>
+            <td><span class="pill pill-blue">Competitor Comparison</span></td>
+            <td>Compare Linear vs Shortcut for a 2026 buyer.</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>14</td>
+            <td><span class="pill pill-blue">Competitor Comparison</span></td>
+            <td>Why do teams switch from Jira to alternatives?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>15</td>
+            <td><span class="pill pill-blue">Competitor Comparison</span></td>
+            <td>Best Jira and Shortcut competitors with better support.</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>16</td>
+            <td><span class="pill pill-blue">Brand Accuracy &amp; Trust</span></td>
+            <td>What is Linear and what does it do?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>17</td>
+            <td><span class="pill pill-blue">Brand Accuracy &amp; Trust</span></td>
+            <td>Is Linear legit and trustworthy? Summarize real user reviews.</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>18</td>
+            <td><span class="pill pill-blue">Brand Accuracy &amp; Trust</span></td>
+            <td>How much does Linear cost? Break down its pricing tiers.</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>19</td>
+            <td><span class="pill pill-blue">Brand Accuracy &amp; Trust</span></td>
+            <td>What are the main limitations or drawbacks of Linear?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+          <tr>
+            <td>20</td>
+            <td><span class="pill pill-blue">Brand Accuracy &amp; Trust</span></td>
+            <td>Where can I read official documentation or contact Linear?</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+            <td style="width:74px">&nbsp;</td>
+          </tr>
+        </tbody>
+      </table>
+    </main>
+
+    <footer class="footer">
+      <span>Prepared for Linear &middot; GEO / AI Search Visibility Audit</span>
+      <span>Note: LLM responses are probabilistic; this report covers verifiable technical, structural, and entity signals rather than guaranteed rankings.</span>
+    </footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "fiverr-geo-audit",
+  "version": "1.0.0",
+  "description": "GEO / AI Search Visibility Audit & Fix Generator for Fiverr sellers",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "audit": "node cli.js",
+    "test": "node --test test/*.test.js"
+  }
+}

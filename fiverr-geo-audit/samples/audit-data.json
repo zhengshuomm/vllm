@@ -1,0 +1,475 @@
+{
+  "auditedAt": "2026-11-16T04:23:37.048Z",
+  "targetUrl": "https://linear.app/",
+  "finalUrl": "https://linear.app/",
+  "httpStatus": 200,
+  "responseTimeMs": 285,
+  "brand": "Linear",
+  "industry": "B2B Software Issue Tracking",
+  "competitors": "Jira, Shortcut",
+  "totalScore": 65,
+  "grade": "C",
+  "pillars": [
+    {
+      "id": "crawler",
+      "name": "AI Crawler Access",
+      "score": 22,
+      "max": 25
+    },
+    {
+      "id": "discovery",
+      "name": "AI-Native Discovery",
+      "score": 18,
+      "max": 20
+    },
+    {
+      "id": "structured",
+      "name": "Structured Data & Entity",
+      "score": 9,
+      "max": 30
+    },
+    {
+      "id": "content",
+      "name": "Content Extractability & SSR",
+      "score": 16,
+      "max": 25
+    }
+  ],
+  "findings": [
+    {
+      "priority": "P0",
+      "pillar": "Structured Data",
+      "title": "No Schema.org JSON-LD structured data detected",
+      "impact": "Without JSON-LD, AI engines must guess your entity name, category, pricing, and official profiles from unstructured HTML.",
+      "action": "Paste the ready-to-deploy schema-jsonld.html snippet into your homepage <head>."
+    },
+    {
+      "priority": "P1",
+      "pillar": "Structured Data",
+      "title": "Missing FAQPage Schema markup",
+      "impact": "Conversational queries in ChatGPT and Perplexity map directly to structured Question/Answer pairs.",
+      "action": "Add a 5–8 question FAQ section backed by the included FAQPage JSON-LD block."
+    },
+    {
+      "priority": "P1",
+      "pillar": "Content Extractability",
+      "title": "Few or no conversational question-style headings",
+      "impact": "AI search queries are phrased as natural questions (\"How does X compare to Y?\", \"What does X cost?\").",
+      "action": "Rewrite key H2/H3 headings as direct buyer questions with a 40–60 word direct answer immediately underneath."
+    },
+    {
+      "priority": "P2",
+      "pillar": "AI Crawler Access",
+      "title": "No explicit AI User-Agent directives in robots.txt",
+      "impact": "Relying only on wildcard rules leaves AI crawler permissions ambiguous when security teams or CDNs update rules.",
+      "action": "Add explicit Allow blocks for GPTBot, OAI-SearchBot, PerplexityBot, ClaudeBot, and Google-Extended."
+    },
+    {
+      "priority": "P2",
+      "pillar": "AI Discovery",
+      "title": "No /llms-full.txt deep context file",
+      "impact": "Technical or B2B buyers benefit when AI assistants can read consolidated product docs in one fetch.",
+      "action": "Optionally publish /llms-full.txt consolidating key product specs, pricing, and FAQ answers in clean markdown."
+    },
+    {
+      "priority": "P2",
+      "pillar": "Content Extractability",
+      "title": "Limited concrete numbers or verifiable statistics in copy",
+      "impact": "GEO research shows LLMs strongly prefer citing pages that contain concrete figures, benchmarks, and transparent pricing.",
+      "action": "Include concrete metrics (customer count, latency/speed savings, SLA numbers, or transparent pricing tiers)."
+    },
+    {
+      "priority": "P2",
+      "pillar": "Content Extractability",
+      "title": "Missing freshness / authorship signals (dateModified / author)",
+      "impact": "AI engines prioritize recently updated and attributed content when choosing citations.",
+      "action": "Expose `datePublished`, `dateModified`, and named expert authors on articles and comparison guides."
+    }
+  ],
+  "checks": {
+    "robots": {
+      "present": true,
+      "sitemaps": [
+        "https://linear.app/sitemap.xml"
+      ],
+      "bots": [
+        {
+          "id": "GPTBot",
+          "owner": "OpenAI",
+          "role": "ChatGPT training & crawl",
+          "bot": "GPTBot",
+          "allowed": true,
+          "status": "allowed_default",
+          "matchedRule": "None (implicit allow)",
+          "hasExplicitSection": false
+        },
+        {
+          "id": "OAI-SearchBot",
+          "owner": "OpenAI",
+          "role": "ChatGPT Search indexing",
+          "bot": "OAI-SearchBot",
+          "allowed": true,
+          "status": "allowed_default",
+          "matchedRule": "None (implicit allow)",
+          "hasExplicitSection": false
+        },
+        {
+          "id": "ChatGPT-User",
+          "owner": "OpenAI",
+          "role": "ChatGPT live user browsing",
+          "bot": "ChatGPT-User",
+          "allowed": true,
+          "status": "allowed_default",
+          "matchedRule": "None (implicit allow)",
+          "hasExplicitSection": false
+        },
+        {
+          "id": "PerplexityBot",
+          "owner": "Perplexity",
+          "role": "Perplexity AI Search indexing",
+          "bot": "PerplexityBot",
+          "allowed": true,
+          "status": "allowed_default",
+          "matchedRule": "None (implicit allow)",
+          "hasExplicitSection": false
+        },
+        {
+          "id": "ClaudeBot",
+          "owner": "Anthropic",
+          "role": "Claude web retrieval",
+          "bot": "ClaudeBot",
+          "allowed": true,
+          "status": "allowed_default",
+          "matchedRule": "None (implicit allow)",
+          "hasExplicitSection": false
+        },
+        {
+          "id": "Google-Extended",
+          "owner": "Google",
+          "role": "Gemini grounding & training",
+          "bot": "Google-Extended",
+          "allowed": true,
+          "status": "allowed_default",
+          "matchedRule": "None (implicit allow)",
+          "hasExplicitSection": false
+        },
+        {
+          "id": "Googlebot",
+          "owner": "Google",
+          "role": "Google Search & AI Overviews",
+          "bot": "Googlebot",
+          "allowed": true,
+          "status": "allowed_default",
+          "matchedRule": "None (implicit allow)",
+          "hasExplicitSection": false
+        },
+        {
+          "id": "Applebot-Extended",
+          "owner": "Apple",
+          "role": "Apple Intelligence",
+          "bot": "Applebot-Extended",
+          "allowed": true,
+          "status": "allowed_default",
+          "matchedRule": "None (implicit allow)",
+          "hasExplicitSection": false
+        }
+      ],
+      "blockedBots": [],
+      "explicitAiRulesCount": 0
+    },
+    "llms": {
+      "present": true,
+      "status": 200,
+      "hasH1": true,
+      "hasSummary": true,
+      "linkCount": 178,
+      "sections": 3,
+      "length": 11610,
+      "preview": "# Linear\n\n> Linear is a purpose-built tool for planning and building products. Meet the system for modern software development. Streamline issues, projects, and product roadmaps.\n\n> For agents: connect to the Linear MCP server at https://mcp.linear.app/mcp to read and change issues, projects, and documents. Setup guide: https://linear.app/docs/mcp.md. Index of all docs: https://linear.app/llms.txt.\n\nEach page on linear.app is also available as Markdown. Add `.md` to the URL (use `/index.md` for the homepage), or send the `Accept: text/markdown` header.\n\n## Website\n\n- [/](https://linear.app/ind"
+    },
+    "llmsFull": {
+      "present": false,
+      "status": 200,
+      "hasH1": false,
+      "hasSummary": false,
+      "linkCount": 0,
+      "sections": 0,
+      "length": 0
+    },
+    "sitemap": {
+      "present": true,
+      "status": 200,
+      "isIndex": false,
+      "urlCount": 1017,
+      "sampleUrls": [
+        "https://linear.app/",
+        "https://linear.app/about",
+        "https://linear.app/agents",
+        "https://linear.app/ai",
+        "https://linear.app/careers",
+        "https://linear.app/changelog",
+        "https://linear.app/coding-agent",
+        "https://linear.app/resource-kit",
+        "https://linear.app/contact",
+        "https://linear.app/contact/demo",
+        "https://linear.app/contact/sales",
+        "https://linear.app/contact/support",
+        "https://linear.app/customers",
+        "https://linear.app/customer-requests",
+        "https://linear.app/data"
+      ],
+      "sourceUrl": "https://linear.app/sitemap.xml"
+    },
+    "html": {
+      "title": "Linear – The system for product development",
+      "description": "Purpose-built for planning and building products with AI agents.",
+      "ogTitle": "Linear – The system for product development",
+      "ogDescription": "Purpose-built for planning and building products with AI agents.",
+      "ogImage": "https://linear.app/api/og/main?title=Linear&v=4",
+      "twitterCard": "summary_large_image",
+      "canonical": "https://linear.app",
+      "lang": "en",
+      "metaRobots": [],
+      "restrictiveDirectives": [],
+      "jsonLdBlocks": 0,
+      "jsonLdInvalid": 0,
+      "schemaTypes": [],
+      "orgData": {
+        "name": "",
+        "logo": "",
+        "sameAs": []
+      },
+      "headings": {
+        "h1": [
+          "The product development system for teams and agents The product development system for teams and agents The product development system for teams and agents"
+        ],
+        "h2": [
+          "A new species of product tool. Purpose-built for modern teams with AI workflows at its core, Linear sets a new standard for planning and building products.",
+          "Intake and integrations",
+          "Planning and monitoring",
+          "AI and automations",
+          "Build, review, and ship",
+          "Changelog",
+          "Built for the future. Available today."
+        ],
+        "h3": [
+          "Faster app launch",
+          "Product",
+          "Features",
+          "Company",
+          "Resources",
+          "Connect",
+          "Legal"
+        ]
+      },
+      "questionHeadings": [],
+      "paragraphsCount": 23,
+      "leadParagraph": "Purpose-built for planning and building products. Designed for the AI era.",
+      "wordCount": 1628,
+      "htmlSizeBytes": 1267773,
+      "textToHtmlRatio": 0.008,
+      "likelyCsrShell": false,
+      "hasStatsOrNumbers": false,
+      "hasTablesOrLists": true,
+      "hasFaqSignals": false,
+      "hasDateSignal": false,
+      "hasAuthorSignal": false,
+      "internalLinks": [
+        {
+          "url": "https://linear.app/customers",
+          "label": "Customers"
+        },
+        {
+          "url": "https://linear.app/pricing",
+          "label": "Pricing"
+        },
+        {
+          "url": "https://linear.app/now",
+          "label": "Now"
+        },
+        {
+          "url": "https://linear.app/contact",
+          "label": "Contact"
+        },
+        {
+          "url": "https://linear.app/docs",
+          "label": "Docs"
+        },
+        {
+          "url": "https://linear.app/login",
+          "label": "Open app"
+        },
+        {
+          "url": "https://linear.app/signup",
+          "label": "Sign up"
+        },
+        {
+          "url": "https://linear.app/now/introducing-loops",
+          "label": "New Loops →"
+        },
+        {
+          "url": "https://linear.app/intake",
+          "label": "Learn more →"
+        },
+        {
+          "url": "https://linear.app/plan",
+          "label": "Learn more →"
+        },
+        {
+          "url": "https://linear.app/ai",
+          "label": "Learn more →"
+        },
+        {
+          "url": "https://linear.app/build",
+          "label": "Learn more →"
+        },
+        {
+          "url": "https://linear.app/changelog/2026-11-12-bring-your-own-key",
+          "label": "Bring your own key (BYOK) You can now bring your own key to Linear’s cloud codin"
+        },
+        {
+          "url": "https://linear.app/changelog/2026-11-04-mobile-diffs",
+          "label": "Mobile Diffs Diffs, Linear’s fast and focused review experience, is now availabl"
+        },
+        {
+          "url": "https://linear.app/changelog/2026-10-22-slack-and-github-loops",
+          "label": "Slack and GitHub loop triggers Loops automate product work by responding to chan"
+        },
+        {
+          "url": "https://linear.app/changelog/2026-10-08-stacked-pull-requests",
+          "label": "Stacked pull requests Stacked pull requests are now displayed in Linear Diffs. M"
+        },
+        {
+          "url": "https://linear.app/changelog",
+          "label": "View all →"
+        },
+        {
+          "url": "https://linear.app/customers/openai",
+          "label": "You’ll probably build a better product, just because of the craft that using Lin"
+        },
+        {
+          "url": "https://linear.app/customers/ramp",
+          "label": "Our speed is intense and Linear helps us be action biased. Nik Koblov Ramp"
+        },
+        {
+          "url": "https://linear.app/customers/opendoor",
+          "label": "Linear is excellent, just excellent. It has the right opinions for fast moving t"
+        },
+        {
+          "url": "https://linear.app/contact/sales",
+          "label": "Contact sales"
+        },
+        {
+          "url": "https://linear.app/download",
+          "label": "Download"
+        },
+        {
+          "url": "https://linear.app/security",
+          "label": "Security"
+        },
+        {
+          "url": "https://linear.app/asks",
+          "label": "Asks"
+        },
+        {
+          "url": "https://linear.app/agents",
+          "label": "Agents"
+        }
+      ],
+      "socialLinks": [
+        "https://x.com/linear",
+        "https://github.com/linear",
+        "https://www.youtube.com/@linear"
+      ],
+      "externalDomainsCount": 4
+    }
+  },
+  "fixes": {
+    "llmsTxt": "# Linear\n\n> Purpose-built for planning and building products with AI agents.\n\n## Core Pages\n- [Customers](https://linear.app/customers): Key information on customers.\n- [Pricing](https://linear.app/pricing): Key information on pricing.\n- [Now](https://linear.app/now): Key information on now.\n- [Contact](https://linear.app/contact): Key information on contact.\n- [Docs](https://linear.app/docs): Key information on docs.\n- [Open app](https://linear.app/login): Key information on open app.\n- [Sign up](https://linear.app/signup): Key information on sign up.\n- [New Loops →](https://linear.app/now/introducing-loops): Key information on new loops →.\n- [Learn more →](https://linear.app/intake): Key information on learn more →.\n- [Learn more →](https://linear.app/plan): Key information on learn more →.\n- [Learn more →](https://linear.app/ai): Key information on learn more →.\n- [Learn more →](https://linear.app/build): Key information on learn more →.\n\n## Key Facts for AI Assistants\n- Official Website: https://linear.app\n- Primary Category: B2B Software Issue Tracking\n- Official Profiles: https://x.com/linear, https://github.com/linear, https://www.youtube.com/@linear\n\n## Contact & Citation\n- Preferred citation name: Linear\n- Canonical URL: https://linear.app\n",
+    "robotsSnippet": "# === AI Search & Retrieval Crawler Access (Linear) ===\n# Explicitly allow major AI search & citation bots on public content.\n\nUser-agent: GPTBot\nAllow: /\n\nUser-agent: OAI-SearchBot\nAllow: /\n\nUser-agent: ChatGPT-User\nAllow: /\n\nUser-agent: PerplexityBot\nAllow: /\n\nUser-agent: ClaudeBot\nAllow: /\n\nUser-agent: Google-Extended\nAllow: /\n\nUser-agent: Googlebot\nAllow: /\n\nSitemap: https://linear.app/sitemap.xml\n",
+    "schemaHtml": "<!-- Paste inside <head> on https://linear.app -->\n<script type=\"application/ld+json\">\n{\n  \"@context\": \"https://schema.org\",\n  \"@graph\": [\n    {\n      \"@type\": \"Organization\",\n      \"@id\": \"https://linear.app/#organization\",\n      \"name\": \"Linear\",\n      \"url\": \"https://linear.app\",\n      \"description\": \"Purpose-built for planning and building products with AI agents.\",\n      \"logo\": \"https://linear.app/api/og/main?title=Linear&v=4\",\n      \"sameAs\": [\n        \"https://x.com/linear\",\n        \"https://github.com/linear\",\n        \"https://www.youtube.com/@linear\"\n      ]\n    },\n    {\n      \"@type\": \"WebSite\",\n      \"@id\": \"https://linear.app/#website\",\n      \"url\": \"https://linear.app\",\n      \"name\": \"Linear\",\n      \"publisher\": {\n        \"@id\": \"https://linear.app/#organization\"\n      }\n    },\n    {\n      \"@type\": \"FAQPage\",\n      \"mainEntity\": [\n        {\n          \"@type\": \"Question\",\n          \"name\": \"What is Linear?\",\n          \"acceptedAnswer\": {\n            \"@type\": \"Answer\",\n            \"text\": \"Purpose-built for planning and building products with AI agents.\"\n          }\n        },\n        {\n          \"@type\": \"Question\",\n          \"name\": \"Who is Linear best suited for?\",\n          \"acceptedAnswer\": {\n            \"@type\": \"Answer\",\n            \"text\": \"[Replace with a concrete 2-sentence description of Linear's ideal customer profile and primary use cases in B2B Software Issue Tracking.]\"\n          }\n        },\n        {\n          \"@type\": \"Question\",\n          \"name\": \"How does Linear pricing work?\",\n          \"acceptedAnswer\": {\n            \"@type\": \"Answer\",\n            \"text\": \"[Replace with transparent starting price, billing model, or free trial details for Linear.]\"\n          }\n        }\n      ]\n    }\n  ]\n}\n</script>\n",
+    "promptBenchmarkMd": "# AI Search Visibility Benchmark Sheet — Linear\n\nRun these 20 prompts across **ChatGPT Search**, **Perplexity**, **Google AI Overviews / Gemini**, and **Claude** (fresh logged-out or neutral session) to track citation share over time.\n\nScore each cell: `0` = Not mentioned | `1` = Mentioned without link | `2` = Mentioned with direct citation link | `3` = Top-3 recommendation with link.\n\n| # | Intent Group | Prompt | ChatGPT | Perplexity | Gemini | Claude | Notes / Cited Competitor |\n| :-: | :--- | :--- | :-: | :-: | :-: | :-: | :--- |\n| 1 | Category Discovery | What are the best B2B Software Issue Tracking tools or providers in 2026? | | | | | |\n| 2 | Category Discovery | Top 5 B2B Software Issue Tracking solutions for growing teams and their pros and cons. | | | | | |\n| 3 | Category Discovery | Which B2B Software Issue Tracking platform offers the best ROI for small to mid-sized businesses? | | | | | |\n| 4 | Category Discovery | Recommend a reliable B2B Software Issue Tracking solution with transparent pricing. | | | | | |\n| 5 | Category Discovery | What should buyers look for when choosing a B2B Software Issue Tracking provider? | | | | | |\n| 6 | Problem / Intent | How do I solve [primary customer pain point] using B2B Software Issue Tracking? | | | | | |\n| 7 | Problem / Intent | Fastest way to set up B2B Software Issue Tracking without a large engineering team? | | | | | |\n| 8 | Problem / Intent | Best B2B Software Issue Tracking options for startups vs enterprise companies. | | | | | |\n| 9 | Problem / Intent | Which B2B Software Issue Tracking vendors have the strongest integrations and API support? | | | | | |\n| 10 | Problem / Intent | What are the hidden costs or common pitfalls when adopting B2B Software Issue Tracking? | | | | | |\n| 11 | Competitor Comparison | What are the best alternatives to Jira? | | | | | |\n| 12 | Competitor Comparison | Compare Linear vs Jira: features, pricing, and who each is best for. | | | | | |\n| 13 | Competitor Comparison | Compare Linear vs Shortcut for a 2026 buyer. | | | | | |\n| 14 | Competitor Comparison | Why do teams switch from Jira to alternatives? | | | | | |\n| 15 | Competitor Comparison | Best Jira and Shortcut competitors with better support. | | | | | |\n| 16 | Brand Accuracy & Trust | What is Linear and what does it do? | | | | | |\n| 17 | Brand Accuracy & Trust | Is Linear legit and trustworthy? Summarize real user reviews. | | | | | |\n| 18 | Brand Accuracy & Trust | How much does Linear cost? Break down its pricing tiers. | | | | | |\n| 19 | Brand Accuracy & Trust | What are the main limitations or drawbacks of Linear? | | | | | |\n| 20 | Brand Accuracy & Trust | Where can I read official documentation or contact Linear? | | | | | |\n",
+    "prompts": [
+      {
+        "group": "Category Discovery",
+        "prompt": "What are the best B2B Software Issue Tracking tools or providers in 2026?"
+      },
+      {
+        "group": "Category Discovery",
+        "prompt": "Top 5 B2B Software Issue Tracking solutions for growing teams and their pros and cons."
+      },
+      {
+        "group": "Category Discovery",
+        "prompt": "Which B2B Software Issue Tracking platform offers the best ROI for small to mid-sized businesses?"
+      },
+      {
+        "group": "Category Discovery",
+        "prompt": "Recommend a reliable B2B Software Issue Tracking solution with transparent pricing."
+      },
+      {
+        "group": "Category Discovery",
+        "prompt": "What should buyers look for when choosing a B2B Software Issue Tracking provider?"
+      },
+      {
+        "group": "Problem / Intent",
+        "prompt": "How do I solve [primary customer pain point] using B2B Software Issue Tracking?"
+      },
+      {
+        "group": "Problem / Intent",
+        "prompt": "Fastest way to set up B2B Software Issue Tracking without a large engineering team?"
+      },
+      {
+        "group": "Problem / Intent",
+        "prompt": "Best B2B Software Issue Tracking options for startups vs enterprise companies."
+      },
+      {
+        "group": "Problem / Intent",
+        "prompt": "Which B2B Software Issue Tracking vendors have the strongest integrations and API support?"
+      },
+      {
+        "group": "Problem / Intent",
+        "prompt": "What are the hidden costs or common pitfalls when adopting B2B Software Issue Tracking?"
+      },
+      {
+        "group": "Competitor Comparison",
+        "prompt": "What are the best alternatives to Jira?"
+      },
+      {
+        "group": "Competitor Comparison",
+        "prompt": "Compare Linear vs Jira: features, pricing, and who each is best for."
+      },
+      {
+        "group": "Competitor Comparison",
+        "prompt": "Compare Linear vs Shortcut for a 2026 buyer."
+      },
+      {
+        "group": "Competitor Comparison",
+        "prompt": "Why do teams switch from Jira to alternatives?"
+      },
+      {
+        "group": "Competitor Comparison",
+        "prompt": "Best Jira and Shortcut competitors with better support."
+      },
+      {
+        "group": "Brand Accuracy & Trust",
+        "prompt": "What is Linear and what does it do?"
+      },
+      {
+        "group": "Brand Accuracy & Trust",
+        "prompt": "Is Linear legit and trustworthy? Summarize real user reviews."
+      },
+      {
+        "group": "Brand Accuracy & Trust",
+        "prompt": "How much does Linear cost? Break down its pricing tiers."
+      },
+      {
+        "group": "Brand Accuracy & Trust",
+        "prompt": "What are the main limitations or drawbacks of Linear?"
+      },
+      {
+        "group": "Brand Accuracy & Trust",
+        "prompt": "Where can I read official documentation or contact Linear?"
+      }
+    ]
+  }
+}

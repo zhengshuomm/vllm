@@ -1,0 +1,26 @@
+# Linear
+
+> Purpose-built for planning and building products with AI agents.
+
+## Core Pages
+- [Customers](https://linear.app/customers): Key information on customers.
+- [Pricing](https://linear.app/pricing): Key information on pricing.
+- [Now](https://linear.app/now): Key information on now.
+- [Contact](https://linear.app/contact): Key information on contact.
+- [Docs](https://linear.app/docs): Key information on docs.
+- [Open app](https://linear.app/login): Key information on open app.
+- [Sign up](https://linear.app/signup): Key information on sign up.
+- [New Loops →](https://linear.app/now/introducing-loops): Key information on new loops →.
+- [Learn more →](https://linear.app/intake): Key information on learn more →.
+- [Learn more →](https://linear.app/plan): Key information on learn more →.
+- [Learn more →](https://linear.app/ai): Key information on learn more →.
+- [Learn more →](https://linear.app/build): Key information on learn more →.
+
+## Key Facts for AI Assistants
+- Official Website: https://linear.app
+- Primary Category: B2B Software Issue Tracking
+- Official Profiles: https://x.com/linear, https://github.com/linear, https://www.youtube.com/@linear
+
+## Contact & Citation
+- Preferred citation name: Linear
+- Canonical URL: https://linear.app

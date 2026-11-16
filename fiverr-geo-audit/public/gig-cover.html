@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fiverr Gig Cover — GEO &amp; AI Search Audit</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #0b1120;
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    }
+    .canvas {
+      width: 1280px;
+      height: 769px;
+      background: radial-gradient(circle at 82% 20%, rgba(59, 130, 246, .35), transparent 44%),
+                  radial-gradient(circle at 18% 85%, rgba(16, 185, 129, .22), transparent 42%),
+                  linear-gradient(135deg, #0b1120 0%, #111c36 55%, #0f172a 100%);
+      color: #fff;
+      padding: 62px 68px;
+      display: grid;
+      grid-template-columns: 1.15fr 0.95fr;
+      gap: 44px;
+      align-items: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(37, 99, 235, .24);
+      border: 1px solid rgba(96, 165, 250, .45);
+      color: #93c5fd;
+      padding: 8px 16px;
+      border-radius: 99px;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      margin-bottom: 22px;
+    }
+    h1 {
+      margin: 0 0 20px;
+      font-size: 56px;
+      line-height: 1.08;
+      letter-spacing: -.02em;
+      font-weight: 800;
+    }
+    h1 .hl { color: #38bdf8; }
+    .sub {
+      font-size: 22px;
+      line-height: 1.45;
+      color: #cbd5e1;
+      margin: 0 0 30px;
+      max-width: 560px;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 30px;
+    }
+    .chip {
+      background: rgba(255, 255, 255, .08);
+      border: 1px solid rgba(255, 255, 255, .14);
+      padding: 9px 15px;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      color: #f1f5f9;
+    }
+    .deliverables {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px 18px;
+      font-size: 17px;
+      color: #e2e8f0;
+      font-weight: 600;
+    }
+    .deliverables div::before {
+      content: "✓";
+      display: inline-grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: rgba(34, 197, 94, .2);
+      color: #4ade80;
+      margin-right: 10px;
+      font-weight: 800;
+    }
+    .mockup {
+      background: #ffffff;
+      color: #0f172a;
+      border-radius: 18px;
+      padding: 28px;
+      box-shadow: 0 25px 60px rgba(0, 0, 0, .45);
+      border: 1px solid rgba(255, 255, 255, .2);
+    }
+    .mock-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 18px;
+      border-bottom: 1px solid #e2e8f0;
+      margin-bottom: 18px;
+    }
+    .mock-title { font-size: 18px; font-weight: 800; }
+    .mock-sub { font-size: 13px; color: #64748b; margin-top: 2px; }
+    .score-ring {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      padding: 8px 14px;
+      border-radius: 12px;
+    }
+    .score-num { font-size: 28px; font-weight: 800; color: #15803d; line-height: 1; }
+    .score-lbl { font-size: 12px; color: #166534; font-weight: 700; }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #f8fafc;
+      margin-bottom: 9px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .tag { padding: 4px 10px; border-radius: 99px; font-size: 12px; font-weight: 700; }
+    .ok { background: #dcfce7; color: #166534; }
+    .warn { background: #fef3c7; color: #92400e; }
+    .bad { background: #fee2e2; color: #991b1b; }
+    .code-card {
+      margin-top: 14px;
+      background: #0f172a;
+      color: #cbd5e1;
+      border-radius: 10px;
+      padding: 14px 16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+    .code-card .k { color: #38bdf8; }
+    .code-card .g { color: #4ade80; }
+  </style>
+</head>
+<body>
+  <div class="canvas" id="cover">
+    <div>
+      <div class="badge">GEO &amp; AEO Technical Audit</div>
+      <h1>Get Cited by <span class="hl">ChatGPT</span>, Perplexity &amp; Gemini</h1>
+      <p class="sub">Complete AI Search Visibility Audit + Ready-to-Deploy Technical Fixes for Your Website.</p>
+      <div class="chips">
+        <span class="chip">ChatGPT Search</span>
+        <span class="chip">Perplexity</span>
+        <span class="chip">Google AI Overviews</span>
+        <span class="chip">Claude</span>
+      </div>
+      <div class="deliverables">
+        <div>16-Point Technical Audit PDF</div>
+        <div>Custom /llms.txt File</div>
+        <div>Schema.org JSON-LD Pack</div>
+        <div>robots.txt AI Bot Patch</div>
+        <div>SSR &amp; Entity Diagnostics</div>
+        <div>20-Prompt Visibility Sheet</div>
+      </div>
+    </div>
+
+    <div class="mockup">
+      <div class="mock-head">
+        <div>
+          <div class="mock-title">AI Search Readiness Report</div>
+          <div class="mock-sub">Technical GEO &amp; Citation Diagnostics</div>
+        </div>
+        <div class="score-ring">
+          <div class="score-num">88</div>
+          <div class="score-lbl">GEO SCORE<br>AFTER FIX</div>
+        </div>
+      </div>
+      <div class="row"><span>GPTBot / OAI-SearchBot / PerplexityBot</span><span class="tag ok">Allowed</span></div>
+      <div class="row"><span>/llms.txt AI Context Manifest</span><span class="tag ok">Deployed</span></div>
+      <div class="row"><span>Organization + FAQPage JSON-LD</span><span class="tag ok">Valid Schema</span></div>
+      <div class="row"><span>Client-Side Rendering Check (SSR)</span><span class="tag warn">Action Needed</span></div>
+      <div class="row"><span>20-Prompt Competitor Benchmark</span><span class="tag ok">Included</span></div>
+      <div class="code-card">
+        <div><span class="k">User-agent:</span> OAI-SearchBot &nbsp;<span class="g">Allow: /</span></div>
+        <div><span class="k">File:</span> /llms.txt &nbsp;<span class="g"># Curated Brand Index</span></div>
+        <div><span class="k">"@type":</span> ["Organization", "FAQPage"]</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
