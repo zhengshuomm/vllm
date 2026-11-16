@@ -1,0 +1,14 @@
+{
+  "name": "dataku-data-manager",
+  "version": "1.0.0",
+  "description": "Sistem pencatatan & manajemen data: CRUD, pencarian, filter, dasbor, hak akses bertingkat, ekspor Excel/CSV.",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  }
+}
