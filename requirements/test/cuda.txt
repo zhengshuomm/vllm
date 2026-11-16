@@ -687,7 +687,7 @@ nvidia-nvtx==13.0.85
     # via cuda-toolkit
 open-clip-torch==2.32.0
     # via -r requirements/test/cuda.in
-openai==2.44.0
+openai==3.50.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
