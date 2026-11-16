@@ -286,6 +286,17 @@ class KVCacheManager:
                   the junction and defeat cross-request reuse.
 
         """
+        # [Prefix Caching 最长前缀匹配 - KVCacheManager.get_computed_blocks]
+        # 利用请求入队时预计算的链式哈希 (request.block_hashes)，在 BlockPool 哈希表中顺序查找最长前缀命中。
+        # 关键细节：即便整条 Prompt 100% 命中缓存，也必须保留至少最后 1 个 token 不算作命中 (max_cache_hit_length = prompt_len - 1)，
+        # 因为模型至少需要把最后 1 个 token 送入前向计算，才能算出预测首个生成 token 的 logits！
+        #
+        # 【具体例子 Sample（设 block_size = 16）】：
+        # - 情况 A（部分命中）：Prompt 长 40，链式块哈希为 [H0(tok[0:16]), H1(tok[16:32])]（末尾 8 个 token 不满一块无哈希）。
+        #   若 H0 命中物理块 3、H1 未命中 -> 返回 (computed_blocks=[[Block(3)]], num_new_computed_tokens=16, ...)。
+        # - 情况 B（100% 全长命中退避）：Prompt 恰好长 32（2 个完整块），且 H0->Block(3)、H1->Block(9) 全部在缓存中！
+        #   此时 max_cache_hit_length = 32 - 1 = 31，按块对齐向下取整后只能采纳前 16 个 token：
+        #   返回 (computed_blocks=[[Block(3)]], num_new_computed_tokens=16)，强制后半块 tok[16:32] 重跑前向以产出 tok[31] 的 logits。
         # We skip finding the prefix cache hit when prefix caching is
         # disabled or the request is marked as skipping kv cache read
         # (which happens when the request requires prompt logprobs
@@ -476,6 +487,12 @@ class KVCacheManager:
             A list of new allocated blocks.
 
         """
+        # [KV Cache 物理块分配核心 - KVCacheManager.allocate_slots]
+        # 负责在每一步调度时为请求绑定/新分配物理块，核心四步：
+        # 1) remove_skipped_blocks: 若模型含 Sliding Window / SWA 层，先释放滑出注意力窗口外的旧块（替换为 null_block 占位）；
+        # 2) 容量预检: 计算 (已命中前缀 + 远端加载 + 本步新算 token + lookahead) 还差多少新块，检查空闲块是否满足 watermark 阈值；
+        # 3) allocate_new_computed_blocks: 将 Prefix Cache 命中的块正式挂到请求名下（调用 BlockPool.touch 将 ref_cnt + 1，防止被驱逐）；
+        # 4) allocate_new_blocks & cache_blocks: 从空闲队列弹出新块供本步写入 KV，并将已填满确定性 token 的完整块注册进哈希表供后续请求复用。
         # A step may need no slots of its own while still adopting computed
         # tokens: an async KV load, or a chunk that ends inside the replayed
         # range of a hit (SWA bounded replay).

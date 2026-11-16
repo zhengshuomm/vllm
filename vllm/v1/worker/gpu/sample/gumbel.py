@@ -186,6 +186,21 @@ def gumbel_noised_argmax(
     appears; `pos` and `seed` place the draw in the request's stream, which is
     what lets a draft and its verification agree.
     """
+    # 【Gumbel-Max 统一贪心与随机采样技巧】：
+    # - 当 temp == 0 时不注入噪声，直接执行确定性 argmax（贪心解码）；
+    # - 当 temp > 0 时基于 (seed, pos, vocab_idx) 实时计算无状态的 Murmur3 哈希伪随机数 u，
+    #   利用数学等价性质 argmax(logits/T + Gumbel(0,1)) ~ Softmax(logits/T) 在单次归约中完成随机采样，
+    #   无需显式计算全词表 Softmax 概率前缀和，且天然支持混合批次中贪心与随机请求并存。
+    #
+    # 【Sample：4 词表玩具数值推演（假设经过语法掩码/Top-P 后某行 logits = [2.0, 1.0, -inf, 0.5]）】：
+    # - 情况 1：贪心请求（temp = 0.0）
+    #     跳过噪声分支，直接计算 max([2.0, 1.0, -inf, 0.5]) -> 确定性返回下标 0（token 0）。
+    # - 情况 2：随机采样请求（temp = 0.8, seed = 42, pos = 21）
+    #     1) 温度缩放：logits / 0.8 = [2.50, 1.25, -inf, 0.625]
+    #     2) 无状态哈希噪声：用 Murmur3(seed=42, pos=21, key=[0,1,2,3]) 独立算出 u = [0.632, 0.050, 0.500, 0.800]
+    #        代入 FP32 尾数保真公式 g = -ln(-ln(1 - u)) 得 gumbel_noise ≈ [0.00, +2.97, +0.37, -0.48]
+    #     3) 叠加噪声并求最大值：logits + g = [2.50, 4.22, -inf, 0.145] -> 返回下标 1（token 1 逆袭胜出！）
+    #        （数学上可严格证明：token i 胜出的概率恰好等于 exp(logits_i / T) / sum_j exp(logits_j / T)！）
     if temp != 0.0 and APPLY_TEMPERATURE:
         # Match the behavior of _temperature_kernel: if that kernel uses
         # tl.div_rn, this must too.

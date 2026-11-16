@@ -153,6 +153,11 @@ class EngineCore:
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
 
+        # [EngineCore 核心组件初始化顺序]
+        # 1) 创建 Executor (UniprocExecutor 或 MultiprocExecutor)，拉起各 GPU Worker 并加载模型权重；
+        # 2) _initialize_kv_caches: 触发 Worker 跑一次峰值显存 Profiling，精确算出剩余可用显存能分配多少 KV Blocks，
+        #    随后通知所有 Worker 实际分配物理 GPU KV Cache 张量，并完成 torch.compile 编译与 CUDA Graph 捕获；
+        # 3) 创建 Scheduler (内含 KVCacheManager)，统一负责后续每一步的 Chunked Prefill + Decode 调度。
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         self._pooler_config_logged = False
@@ -677,6 +682,16 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
+        # [Inference 主路径核心单步 - EngineCore.step (默认无流水线队列模式)]
+        # 每一轮 step 完成“调度 -> 异步发起模型执行 -> 准备结构化输出掩码 -> 获取采样结果 -> 更新调度器状态”闭环：
+        # 1) scheduler.schedule(): 根据 token 预算与可用 KV Cache Block，选出本轮要跑的请求及各自调度的 token 数；
+        # 2) model_executor.execute_model(..., non_block=True): 异步把 SchedulerOutput 发给 Worker 执行前向（甚至采样）；
+        # 3) scheduler.get_grammar_bitmask(): 利用 GPU 正在跑前向的空隙，在 CPU 上并行计算结构化输出(JSON/正则等)的词表 bitmask；
+        # 4) future.result() / sample_tokens():
+        #    - 若无需延迟采样，execute_model 内部已一并完成采样并返回 ModelRunnerOutput；
+        #    - 若前向与采样拆分为两阶段（如需要注入本步刚算出的 grammar_output），返回 None，再调 sample_tokens 完成采样；
+        # 5) scheduler.update_from_output(): 将新生成的 token 追加到 Request，判断是否命中 EOS/max_tokens，释放已完成请求的 KV Blocks，
+        #    并封装为按客户端分组的 EngineCoreOutputs 返回给前端。
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -728,6 +743,18 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
+        # [流水线并行 / 异步多批次主路径 - EngineCore.step_with_batch_queue]
+        # 当开启 Pipeline Parallelism (PP > 1) 或异步调度多并发批次 (max_concurrent_batches > 1) 时启用：
+        # 优先持续向 batch_queue 压入新调度的 micro-batch 以填满 PP 流水线消除气泡；
+        # 只有当队列已满或暂无新请求可调度时，才 pop 最早提交的 future 阻塞等待结果并更新 Scheduler。
+        #
+        # 【Sample：以 PP=2（batch_queue_size = 2）为例看 batch_queue 双端队列的时空重叠状态】：
+        # - Step 1（填队列）：调度 MicroBatch_0 (req_A, req_B) 异步发给 PP Stage 0，
+        #     `batch_queue = [(future_0, sched_out_0, exec_fut_0)]`（长度 1 < 2），立即返回 `(None, True)` 不阻塞等待！
+        # - Step 2（满队列并收割最早批次）：调度互不重叠的 MicroBatch_1 (req_C, req_D) 发给 PP Stage 0（此时 Stage 1 正在跑 MicroBatch_0！），
+        #     `batch_queue = [(future_1, sched_out_1, ...), (future_0, sched_out_0, ...)]`（长度达到 2，队列满）；
+        #     随后从队尾 `batch_queue.pop()` 取出最早的 `(future_0, sched_out_0, ...)` 调用 `future_0.result()`，
+        #     用拿到的 `ModelRunnerOutput_0` 更新 Scheduler 并返回给前端。如此循环，让所有 PP Stage 时刻满载运行！
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
@@ -1171,6 +1198,11 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
+        # [请求入队前预处理 - 在后台 IO 线程中与 GPU 前向并行执行]
+        # 1) 多模态接收端缓存查找/更新 (mm_receiver_cache)；
+        # 2) Request.from_engine_core_request: 构造调度器内部 Request 对象，并用 request_block_hasher
+        #    预先算好整条 Prompt 每个完整 Block 的哈希值（供后续 Prefix Caching O(1) 查表复用）；
+        # 3) 若开启结构化输出，异步触发语法编译器初始化 (grammar_init)。
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.
@@ -1668,6 +1700,11 @@ class EngineCoreProc(EngineCore):
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
+        # [EngineCoreProc 独立进程主循环]
+        # 架构要点：ZMQ 网络收发与 Msgpack 编解码由后台线程 (input_thread / output_thread) 负责，
+        # 主线程只操作内存队列 (input_queue / output_queue) 并全力驱动 Scheduler + GPU Executor：
+        # 1) _process_input_queue(): 若当前无活可干则阻塞等待新请求；若有正在跑的请求则非阻塞吸干队列中的所有新请求/Abort；
+        # 2) _process_engine_step(): 调用 step_fn() 跑完一轮调度与模型推理，将 EngineCoreOutputs 推入 output_queue 由后台线程发回前端。
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
@@ -2054,6 +2091,9 @@ class EngineCoreProc(EngineCore):
                         continue
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
+                    # [后台输入线程关键优化]
+                    # ADD 请求在当前后台 IO 线程中直接完成 Msgpack 解码与 preprocess_add_request
+                    # （含 Prefix Cache 块哈希计算、语法树异步编译），与主线程的 GPU 前向重叠执行。
                     # Deserialize the request data.
                     request: Any
                     if request_type == EngineCoreRequestType.ADD:

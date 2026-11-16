@@ -138,6 +138,8 @@ class OfflineInferenceMixin:
             else {"mm_processor_kwargs": mm_processor_kwargs}
         )
 
+        # [离线推理主路径 Step 1.1 - Prompt 渲染与分词]
+        # Renderer 将字符串/Tokens/多模态输入统一解析并分词为标准化的 EngineInput 字典。
         return renderer.render_cmpl(
             parsed_prompts,
             tok_params,
@@ -572,12 +574,16 @@ class OfflineInferenceMixin:
         lora_request: LoRARequest | None = None,
         priority: int = 0,
     ) -> str:
+        # [离线推理主路径 Step 1.2 - 入队请求]
+        # 离线批处理不需要流式增量返回，因此强制将 output_kind 设为 FINAL_ONLY，
+        # 仅在每条请求完全生成结束时构造最终的 RequestOutput，以减少 Python 层开销。
         if isinstance(params, SamplingParams):
             # We only care about the final output
             params.output_kind = RequestOutputKind.FINAL_ONLY
 
         request_id = str(next(self.request_counter))
 
+        # 送入 LLMEngine -> InputProcessor -> EngineCore
         return self.llm_engine.add_request(
             request_id,
             prompt,
@@ -603,6 +609,10 @@ class OfflineInferenceMixin:
                 postfix=(f"est. speed input: {0:.2f} toks/s, output: {0:.2f} toks/s"),
             )
 
+        # [离线推理主路径 Step 1.3 - 同步驱动推理循环]
+        # Continuous Batching 核心体现：只要引擎中还有未完成请求（waiting 或 running），
+        # 就持续调用 llm_engine.step() 执行一轮调度 + 模型前向 + 采样 + Detokenize。
+        # 短请求会先完成并释放 KV Cache，最后按 request_id 还原与输入一致的顺序返回。
         # Run the engine.
         outputs: list[_O] = []
         total_in_toks = 0

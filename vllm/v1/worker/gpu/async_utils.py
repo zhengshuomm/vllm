@@ -114,6 +114,14 @@ class StepTimingCollector:
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
+    """异步采样结果拷贝句柄（使用独立 CUDA Stream 实现 D2H 拷贝与 GPU 计算重叠）。
+
+    构造时在 copy_stream 上等待 main_stream 完成采样，随后发起 sampled_token_ids、logprobs 等张量的
+    非阻塞 D2H 拷贝并记录 copy_event（blocking=True 睡眠等待，避免忙轮询争抢 CUDA 驱动锁）。
+    此时 main_stream 可立即继续执行请求状态原地更新（post_update）与投机解码草稿生成（speculator.propose），
+    直到上层调用 get_output() 时才真正 synchronize 等待拷贝完成并转为 Python 列表。
+    """
+
     def __init__(
         self,
         model_runner_output: ModelRunnerOutput,

@@ -90,6 +90,12 @@ class ExceptionWithKVConnectorOutput(Exception):
 
 
 class FutureWrapper(Future):
+    """基于 FIFO 队列保序消费 Worker 响应的 Future 包装器。
+
+    当 collective_rpc(..., non_block=True) 连续发起多个异步 RPC（例如 PP 多微批或异步调度）时，
+    共享内存队列中的响应按入队顺序返回；调用任意 future.result() 时会按序排空排在它前面的响应。
+    """
+
     def __init__(
         self,
         futures_queue: deque["FutureWrapper"],
@@ -159,6 +165,13 @@ class MultiprocExecutor(Executor):
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
+        # 【多卡进程间通信拓扑（TP/PP > 1）】：
+        # 1. 下行广播通道（rpc_broadcast_mq）：1 个写者（EngineCore）对 N 个读者（所有 Worker）。
+        #    同节点内基于 POSIX 共享内存环形缓冲区（shm_broadcast）实现零拷贝低延迟广播；
+        #    跨节点时自动退化为 ZMQ PUB/SUB。这样 SchedulerOutput 只需序列化一次即可同步唤醒所有 GPU Worker。
+        # 2. 上行收集通道（response_mqs）：每个 Worker 各自拥有返回队列，但在推理热路径（execute_model /
+        #    sample_tokens）中通过 unique_reply_rank=self.output_rank 优化，仅让最后一个 PP Stage
+        #    的 TP Rank 0 Worker 写回采样后的 Token 结果，避免冗余反序列化。
         if self.parallel_config.node_rank_within_dp == 0:
             # For leader node within each dp rank,
             # each dp will have its own leader multiproc executor.
@@ -489,6 +502,16 @@ class MultiprocExecutor(Executor):
             send_method = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
+        # 将 RPC 方法名、参数（如 SchedulerOutput）及唯一回包 rank 一次性写入共享内存广播队列
+        # 【Sample（以 TP=2, PP=2 共 world_size=4 个 GPU Worker 为例）】：
+        # - 进程拓扑：Rank [0, 1] 负责 PP Stage 0（前半部分层），Rank [2, 3] 负责 PP Stage 1（后半部分层 + LM Head）；
+        #   因此 self.output_rank = 2（即最后一个 PP Stage 的 TP Rank 0）。
+        # - 下行广播 payload 长这样：
+        #     ("execute_model", (scheduler_output,), {}, 2)
+        #   4 个 Worker 进程同时从各自关联的 shm 读指针零拷贝读取该元组并开始并行前向。
+        # - 上行回包收敛：
+        #   Rank 0, 1, 3 发现自身 rank != output_rank (2)，执行完毕后不写回 response_mq；
+        #   唯有 Rank 2 将采样得到的 ModelRunnerOutput 写入 response_mqs[2]，主进程也只监听 response_mqs[2]。
         self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
@@ -1129,6 +1152,8 @@ class WorkerProc:
         it is passed to the async_output_busy_loop thread. Otherwise, it is
         enqueued directly to the worker_response_mq.
         """
+        # 开启异步调度（async_scheduling）时，将 AsyncModelRunnerOutput 交给后台线程等待
+        # CUDA Event 完成并写回 IPC 队列，使 Worker 主线程能立即进入下一轮 step 发射新的 GPU kernel
         if self.use_async_scheduling:
             self.async_output_queue.put(output)
         else:
@@ -1153,6 +1178,9 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers."""
+        # 每个 GPU Worker 子进程的主循环：
+        # 阻塞等待共享内存广播队列中的指令（如 "execute_model" / "sample_tokens"），
+        # 执行后仅当自身为目标回包 rank（或需要全量收集）时通过 worker_response_mq 返回结果。
         assert self.rpc_broadcast_mq is not None
         while True:
             with get_watch_dog().disable():

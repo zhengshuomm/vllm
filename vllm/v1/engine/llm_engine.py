@@ -95,6 +95,11 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
+        # [V1 引擎架构：前后端三段式解耦]
+        # Frontend 侧持有三个核心组件（与在线版 AsyncLLM 结构对称）：
+        # 1) InputProcessor: 将用户输入校验并组装为 EngineCoreRequest；
+        # 2) OutputProcessor: 维护请求侧状态（增量 Detokenizer、Logprobs、Stop string 检测）；
+        # 3) EngineCoreClient: 连接后端 EngineCore（同进程 InprocClient 或跨进程 ZMQ SyncMPClient）。
         self.renderer = renderer = renderer_from_config(self.vllm_config)
 
         # Convert EngineInput --> EngineCoreRequest.
@@ -240,6 +245,11 @@ class LLMEngine:
         prompt_text: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
     ) -> str:
+        # [离线推理主路径 Step 2 - LLMEngine.add_request]
+        # 1) 调用 InputProcessor 将 EngineInput/Prompt 转换为后端可消费的 EngineCoreRequest；
+        # 2) 在前端 OutputProcessor 注册该请求的 RequestState（用于后续增量解码和组装输出）；
+        # 3) 若采样参数 n > 1（Parallel Sampling），裂变为 n 个共享相同 Prompt 前缀的子请求分别入队；
+        # 4) 通过 EngineCoreClient 将请求发送给后端 EngineCore（进入 Scheduler 的 waiting 队列）。
         # Validate the request_id type.
         if not isinstance(request_id, str):
             raise TypeError(f"request_id must be a string, got {type(request_id)}")
@@ -317,15 +327,23 @@ class LLMEngine:
         return req_id
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
+        # [离线推理主路径 Step 3 - LLMEngine.step 单步推进]
+        # 在 DP (Data Parallel) 模式下，若当前 rank 已无请求但其他 DP rank 仍在运行，
+        # 需执行 dummy batch 以对齐跨 DP 通信（如 MoE All-to-All / AllReduce），防止死锁。
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             self.engine_core.execute_dummy_batch()
             return []
 
+        # 1) 从后端 EngineCore 获取一步推理产出的 token IDs 等原始结果 (EngineCoreOutputs)。
+        #    - 同进程模式(InprocClient): 直接同步调用 EngineCore.step()；
+        #    - 多进程模式(SyncMPClient): 从 ZMQ 输出队列阻塞读取后台 EngineCoreProc 算完的一步结果。
         # 1) Get EngineCoreOutput from the EngineCore.
         with record_function_or_nullcontext("llm_engine step: get_output"):
             outputs = self.engine_core.get_output()
 
+        # 2) 前端后处理：增量 Detokenize、检查文本级 stop strings、计算 logprobs，构造 RequestOutput。
+        #    注意：V1 架构特意将 Detokenize 放在前端进程而非 EngineCore，避免阻塞 GPU 调度主循环。
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
             iteration_stats = (

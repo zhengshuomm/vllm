@@ -176,6 +176,9 @@ class DefaultModelState(ModelState):
         ubatch_idx: int = 0,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
+        # 根据当前步的 CUDA Graph 模式决定传递给 Attention 后端的批次维度：
+        # - FULL 图模式需使用填充对齐后的 num_reqs_after_padding / num_tokens_after_padding 以匹配录制时的静态形状；
+        # - PIECEWISE / Eager 模式中 Attention 在图外动态执行，直接使用真实未填充的 num_reqs / num_tokens。
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding

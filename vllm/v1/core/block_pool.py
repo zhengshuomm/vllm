@@ -166,6 +166,18 @@ class BlockPool:
         num_hash_lookahead_tokens: int = 0,
         medium: str = MEDIUM_GPU,
     ):
+        # [物理块池核心数据结构 - BlockPool]
+        # vLLM V1 通过“引用计数 + 双向链表空闲队列 + 哈希表”实现零额外内存开销的 Prefix Caching (APC)：
+        # 1) self.blocks: 预分配固定数量 (num_gpu_blocks) 的逻辑块元数据，block_id 直接对应 GPU KV 张量的物理槽位索引；
+        # 2) self.free_block_queue: 双向链表维护所有 ref_cnt == 0 的可用块（O(1) 弹出/任意位置摘除）：
+        #    - 无哈希的干净块在回收时放队头 (prepend -> LIFO)，优先被新请求拿走覆盖；
+        #    - 带 Prefix Hash 的缓存块在请求结束 ref_cnt 归零时**不清除数据与哈希**，而是按释放时间顺序挂到队尾 (append -> FIFO/LRU)！
+        #      链表形态示意：
+        #        HEAD -> [Block(20) clean] <-> [Block(21) clean] <-> [Block(8) hash=H_old] <-> [Block(3) hash=H_new] <- TAIL
+        #                 ^ 分配新块永远从 HEAD 弹出 (popleft)：先耗尽干净块，再淘汰最久未用的旧缓存块 Block(8)！
+        #      若在被队头弹出覆盖前有新请求命中了 H_new，touch(Block(3)) 会以 O(1) 将 Block(3) 从双向链表中间直接摘除，并把 ref_cnt 置为 1；
+        #      只有当空闲块耗尽、真正从 HEAD 弹出 Block(8) 时，才触发惰性驱逐 (_maybe_evict_cached_block) 从哈希表删掉 H_old。
+        # 3) self.null_block (block_id=0): 启动时即从空闲队列永久弹出，专用于 Sliding Window 滑出区域或 Padding 的安全读写占位。
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.medium = medium

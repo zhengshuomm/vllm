@@ -200,6 +200,8 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    """V2 默认 GPU 模型执行器：负责管理 GPU 常驻请求状态、构建模型与 Attention 输入、调度 CUDA Graph 及执行采样。"""
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -1492,6 +1494,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # Get query_start_loc.
+        # 【GPU 侧输入张量流水线构造】：
+        # CPU 侧仅计算并异步 H2D 拷贝轻量级索引（idx_mapping 与前缀和数组 query_start_loc），
+        # 随后依次发射三个 GPU Triton kernel 原地填充静态 InputBuffers：
+        # 1. prepare_prefill_inputs：搬运 Prefill 阶段请求的输入 token；
+        # 2. prepare_pos_seq_lens：并行生成所有 token 的 RoPE 位置索引 positions 与请求上下文长度 seq_lens；
+        # 3. combine_sampled_and_draft_tokens：将 Decode 请求上一步刚采样出的 last_sampled_tokens
+        #    （及投机解码 draft_tokens）直接拼入 input_ids，并产出需要计算 Logits 的隐藏层行索引 logits_indices。
+        #
+        # 【Sample：三个 Kernel 原地接力填表过程（以 [req_B(3 tok 投机), req_A(1 tok Decode), req_C(8 tok Prefill)] 为例）】：
+        # - 初始 CPU H2D 传入：idx_mapping = [4, 1, 9], query_start_loc = [0, 3, 4, 12]
+        # - Kernel 1 (prepare_prefill_inputs) 后：
+        #     仅填充 is_prefilling 的 req_C 区间 [4:12]（从 UVA all_token_ids[9, 16:24] 拷入）：
+        #     input_ids[:12] = [  ?,   ?,   ?,   ?, 101, 102, 103, 104, 105, 106, 107, 108]
+        # - Kernel 2 (prepare_pos_seq_lens) 后：
+        #     按 num_computed_tokens=[10, 21, 16] + 区间内偏移并行生成位置与总长：
+        #     positions[:12] = [ 10,  11,  12,  21,  16,  17,  18,  19,  20,  21,  22,  23]
+        #     seq_lens[:3]   = [ 13,  22,  24]
+        # - Kernel 3 (combine_sampled_and_draft_tokens) 后：
+        #     把 Decode 请求在显存中的 last_sampled_tokens (501, 888) 和 draft_tokens ([502, 503]) 补齐到 [0:4]：
+        #     input_ids[:12] = [501, 502, 503, 888, 101, 102, 103, 104, 105, 106, 107, 108]
+        #     同时输出需要送入 LM Head 的行号：logits_indices = [0, 1, 2, 3, 11]！
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
@@ -1670,6 +1693,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        # 【Logits 计算与采样主流程】：
+        # 1. 仅按 logits_indices 抽取需要生成新 token 的隐藏状态行（例如 Prefill 请求只取最后一个 token 位置），
+        #    投影得到词表维度的 Logits（支持 TP 词表并行归约或 Batch-Sharded All-to-All 并行采样）。
+        # 2. 若包含结构化输出（JSON Schema / 正则 / 语法约束），在 GPU 上原地将非法 token 的 Logits 置为 -inf。
+        # 3. 无草稿 token 时走常规 Sampler；有投机解码草稿 token 时走 RejectionSampler 一次性验证多个 token。
+        #
+        # 【Sample：稀疏 Logits 剪枝与采样张量形状变化（假设 hidden_size=4096, vocab_size=128256）】：
+        # - 模型前向输出的整批隐藏状态：
+        #     hidden_states:        shape = [16, 4096]  （含 12 个真实 token + 4 个 CUDA Graph Padding token）
+        # - 按 input_batch.logits_indices = [0, 1, 2, 3, 11] 索引抽取（跳过 req_C 前 7 个 Prefill token 及末尾 4 个 Padding！）：
+        #     sample_hidden_states: shape = [5, 4096]   （省去了 11/16 = 68.75% 的超大词表 LM Head 矩阵乘开销）
+        # - 经 model.compute_logits(sample_hidden_states)（TP 场景下内部完成 VocabParallel All-Gather）：
+        #     logits:               shape = [5, 128256] （row 0..2 属于 req_B，row 3 属于 req_A，row 4 属于 req_C）
+        # - 经 Sampler / RejectionSampler 采样返回三元组 (sampler_output, num_sampled, num_rejected)：
+        #     sampler_output.sampled_token_ids = [[502, 999, -1], [777, -1, -1], [404, -1, -1]]  (shape [3, 3])
+        #     num_sampled                      = [2, 1, 0]  （req_C 因 24 < prompt_len 40 强制置 0，丢弃占位的 404）
+        #     num_rejected                     = [1, 0, 0]  （req_B 投机提交 2 个草稿，第 2 个被拒绝故记 1，用于回退进度）
         shard_metadata = None
         global_input_batch = input_batch
         if self.batch_sharder is not None:
@@ -1802,6 +1842,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        # 【V2 ModelRunner 前向主路径（第一阶段：状态同步 + 输入准备 + 模型前向）】：
+        # 1. 增量同步请求状态：清理已完成/被抢占请求，注册新请求，追加缓存请求的增量 KV Block 并刷入 GPU 块表。
+        # 2. 批处理排序与 CUDA Graph 调度（gather_batch_req_state + dispatch_cg_and_sync_dp）：
+        #    将请求按 [投机验证/Decode -> 短扩展 -> Prefill] 排序，决策采用 FULL / PIECEWISE / NONE 图模式，
+        #    并在多 DP Rank 间同步 token 数以保证 MoE EP All-to-All 通信对齐。
+        # 3. 准备输入与 Attention 元数据：构造 InputBatch、物理槽位映射 slot_mappings 与各层 AttentionMetadata。
+        # 4. 执行模型前向：
+        #    - FULL 模式：输入已原地写入静态缓冲区，直接重放整图（run_fullgraph）；
+        #    - PIECEWISE / Eager 模式：进入 set_forward_context 上下文，运行分段图（run_pw_graph）或直接调用 model(**model_inputs)。
+        # 5. 保存 ExecuteModelState：非末级 PP 返回 IntermediateTensors；末级 PP 统一返回 None，
+        #    将采样推迟到紧随其后的 sample_tokens() 阶段（以便与 EngineCore CPU 侧语法掩码计算重叠）。
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -2040,6 +2091,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if inputs_embeds is not None and not requires_raw_input_tokens(self.model):
                 input_ids = None
 
+        # 【Sample：喂给 vLLM 模型 forward(**model_inputs) 的显式字典与隐式上下文长什么样？】
+        # 1. 显式入参字典 model_inputs（全部为一维紧凑 Ragged 张量，无 batch_size 维！）：
+        #    - 纯文本 / 首个 PP Rank：
+        #        {
+        #            "input_ids":            Tensor([16], dtype=int32),      # [501, 502, 503, 888, 101..108, 0, 0, 0, 0]
+        #            "positions":            Tensor([16], dtype=int64),      # [10, 11, 12, 21, 16..23, 0, 0, 0, 0] (MRoPE 时为 [3, 16])
+        #            "inputs_embeds":        None,                           # 多模态开启时为 Tensor([16, 4096], dtype=bf16)，此时 input_ids=None
+        #            "intermediate_tensors": None,                           # 非首 PP Rank 时为 IntermediateTensors({"hidden_states": [16, 4096], ...})
+        #        }
+        # 2. 隐式线程局部上下文（通过下方 `with set_forward_context(attn_metadata, ..., slot_mapping=...)` 注入）：
+        #    模型内部的每一层 `Attention.forward(q, k, v)` 无需在函数签名里层层透传页表，而是直接调用
+        #    `get_forward_context().attn_metadata[layer_name]` 拿到本层的 `FlashAttentionMetadata` 和 `slot_mapping`！
         model_inputs = {
             "input_ids": input_ids,
             "positions": input_batch.positions,
@@ -2181,6 +2244,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
+        # 【V2 ModelRunner 采样主路径（第二阶段：采样 + 异步 D2H 拷贝 + 状态后更新 + 投机草稿生成）】：
+        # 1. 取出 execute_model 暂存的隐状态与批次上下文（非末级 PP 仅接收广播的采样结果并更新本地进度）。
+        # 2. 末级 PP 调用 self.sample() 计算 Logits、应用语法掩码并采样出新 token。
+        # 3. 构造 AsyncOutput：立即在独立 output_copy_stream 上发起采样结果的异步 D2H 拷贝。
+        # 4. 在拷贝进行的同时，主计算流（main_stream）继续执行 postprocess_sampled（原地更新 GPU 请求状态）
+        #    以及投机解码器草稿预测（speculator.propose），最大化隐藏 D2H 传输延迟。
         if self.execute_model_state is None:
             # The prior execute_model call must have failed.
             return None

@@ -406,6 +406,8 @@ class InprocClient(EngineCoreClient):
         self._finalizer = weakref.finalize(self, self.engine_core.shutdown)
 
     def get_output(self) -> EngineCoreOutputs:
+        # [同进程客户端 InprocClient - 单步拉取]
+        # 无独立进程/ZMQ 开销，直接在同一线程同步调用 EngineCore.step_fn() 执行调度与前向推理。
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
         return outputs and outputs.get(0) or EngineCoreOutputs()
@@ -414,6 +416,8 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.get_supported_tasks()
 
     def add_request(self, request: EngineCoreRequest) -> None:
+        # [同进程客户端 InprocClient - 添加请求]
+        # 同步计算 Prefix Cache block hash / 初始化结构化输出语法状态机，并送入 Scheduler waiting 队列。
         req, request_wave = self.engine_core.preprocess_add_request(request)
         self.engine_core.add_request(req, request_wave)
 
@@ -706,6 +710,10 @@ class MPClient(EngineCoreClient):
                     ],
                 )
 
+                # [跨进程 IPC 通道建立 - MPClient]
+                # 1) input_socket (ZMQ ROUTER): 前端向指定 EngineCore 进程发送请求(ADD/ABORT/UTILITY)；
+                # 2) output_socket (ZMQ PULL): 前端从 EngineCore 进程拉取每步产出的 EngineCoreOutputs；
+                # 3) launch_core_engines: fork/spawn 启动独立的 EngineCoreProc 后台进程（内部初始化 Executor 与 GPU Workers）。
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
                 ) as engine_launch:
@@ -1221,6 +1229,9 @@ class AsyncMPClient(MPClient):
             Callable[[AsyncMPClient, Sequence[Any]], Any] | None
         ) = getattr(self.__class__, "eep_process_engine_core_notification", None)
 
+        # [AsyncMPClient 后台接收协程]
+        # 持续监听 ZMQ output_socket，使用 Msgpack 反序列化 EngineCoreOutputs 并放入 asyncio.Queue，
+        # 供上层 AsyncLLM.output_handler 通过 get_output_async() 消费。
         async def process_outputs_socket():
             try:
                 while True:
@@ -1347,6 +1358,9 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async("get_supported_tasks")
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        # [AsyncMPClient 异步投递请求]
+        # 使用 Msgpack 编码 EngineCoreRequest（多模态大张量可通过零拷贝/共享内存通道传输），
+        # 经 ZMQ input_socket 发送 EngineCoreRequestType.ADD 消息到 EngineCoreProc 的输入线程。
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()

@@ -164,6 +164,11 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
+        # [在线推理主路径 - AsyncLLM 前端初始化]
+        # AsyncLLM 运行在 API Server (FastAPI/Uvicorn) 进程中，通过前后端进程分离最大化吞吐：
+        # - 前端进程 (AsyncLLM): 负责 HTTP 接入、分词/多模态预处理 (InputProcessor)、增量解码 (OutputProcessor)；
+        # - 后端进程 (EngineCoreProc): 独立进程运行 busy loop，专心执行 Scheduler + GPU ModelRunner；
+        # - 跨进程通信: 通过 AsyncMPClient 使用 ZeroMQ 异步 socket 收发 EngineCoreRequest / EngineCoreOutputs。
         self.renderer = renderer = renderer_from_config(self.vllm_config)
 
         # Convert EngineInput --> EngineCoreRequest.
@@ -454,6 +459,11 @@ class AsyncLLM(EngineClient):
                 kv_hints,
             )
 
+        # [在线推理主路径 Step 2 - AsyncLLM.add_request 请求预处理与跨进程投递]
+        # 1) 输入转换: 已渲染的 EngineInput 直接同步构造 EngineCoreRequest；原始 Prompt 则放入线程池异步分词/处理多模态，避免阻塞 EventLoop；
+        # 2) 确保后台消费协程 _run_output_handler 已启动；
+        # 3) 为当前请求创建专属的异步收集队列 RequestOutputCollector；
+        # 4) 在 OutputProcessor 注册请求状态，并通过 ZMQ (engine_core.add_request_async) 发往 EngineCore 进程（n>1 时拆分为多个子请求）。
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
             logger.warning_once(
@@ -768,6 +778,17 @@ class AsyncLLM(EngineClient):
             >>> gen = self.generate(engine_input, sampling_params, request_id)
 
         """
+        # [在线推理主路径 Step 1 - AsyncLLM.generate 顶层异步生成器入口]
+        # OpenAI Serving 层 (如 /v1/chat/completions, /v1/completions) 最终都会调用此方法：
+        # - 生产者侧: 后台单实例协程 output_handler 批量从 EngineCore 拉取结果，经 OutputProcessor 解码后推入每个请求专属的队列 q；
+        # - 消费者侧: 当前 generate() 协程从队列 q 中按需拉取 RequestOutput 并 yield 给上层 SSE 流或一次性响应；
+        # - 异常与断连: 若客户端断开连接触发 CancelledError/GeneratorExit，自动向前端和 EngineCore 发送 abort 释放 KV Cache。
+        #
+        # 【Sample：流式 SSE 场景（output_kind = RequestOutputKind.DELTA）每次 async for 迭代 yield 出的对象】：
+        #   第 1 次 yield: RequestOutput(request_id="chatcmpl-1", outputs=[CompletionOutput(text="北", token_ids=[21325], finish_reason=None)], finished=False)
+        #   第 2 次 yield: RequestOutput(request_id="chatcmpl-1", outputs=[CompletionOutput(text="京", token_ids=[15902], finish_reason=None)], finished=False)
+        #   第 3 次 yield: RequestOutput(request_id="chatcmpl-1", outputs=[CompletionOutput(text="。", token_ids=[1811, 151645], finish_reason="stop")], finished=True)
+        #   （注：若请求速度慢于后台 EngineCore 生成速度，RequestOutputCollector 会自动把多次 step 产出的相邻 DELTA 合并成一个包返回，减少事件循环调度开销！）
         q: RequestOutputCollector | None = None
         try:
             q = await self.add_request(
@@ -873,6 +894,12 @@ class AsyncLLM(EngineClient):
         mm_processor_cache = renderer.mm_processor_cache
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
+        # [在线推理主路径 Step 3 - 后台统一输出分发循环 output_handler]
+        # 整个 AsyncLLM 实例全局只有一个 output_handler 协程，承担“多路复用分发器”角色：
+        # 1) await engine_core.get_output_async(): 通过 ZMQ 异步接收 EngineCore 一轮 step 产出的全 batch 输出；
+        # 2) 按 chunk_size 分片调用 output_processor.process_outputs()（防止大 batch 同步 Detokenize 长时间卡住 asyncio 事件循环）；
+        # 3) process_outputs 内部将生成的 RequestOutput 放入对应请求的 RequestOutputCollector，唤醒正在等待的 generate() 协程；
+        # 4) 若前端检测到命中文本级 stop string，立即异步通知 EngineCore abort 该请求，及时回收 GPU KV Cache。
         async def output_handler():
             try:
                 while True:
@@ -1054,6 +1081,8 @@ class AsyncLLM(EngineClient):
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
         """
+        # [在线 Pooling/Embedding 异步入口 - AsyncLLM.encode]
+        # 与 generate() 共用相同的 add_request -> EngineCore -> output_handler 异步管线，产出 PoolingRequestOutput。
         q: RequestOutputCollector | None = None
         try:
             q = await self.add_request(

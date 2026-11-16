@@ -201,6 +201,9 @@ def init_attn_backend(
     active_layer_names: set[str] | None = None,
     draft_layer_names: set[str] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
+    # 【Attention 后端与分组初始化】：
+    # 将同一 KVCacheGroup 内后端类型、KV 规格及 Q 头数相同的层归入同一个 AttentionGroup，
+    # 共享同一个 AttentionMetadataBuilder 和底层算子 Workspace，并汇总全模型最严格的 CUDA Graph 支持能力。
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
 
@@ -405,6 +408,9 @@ def init_kv_cache(
     block_tables: "BlockTables | None" = None,
     attn_groups: Iterable[AttentionGroup] = (),
 ) -> dict[str, Any]:
+    # 在 GPU 上按 KVCacheConfig 一次性分配物理 Paged KV Cache 张量，处理跨层 KV 共享映射，
+    # 并将每层的 KV Cache 视图直接绑定到 static_forward_context 中的对应 Attention 模块上
+    # （使模型 forward 无需显式层层传递 kv_cache 张量参数）。
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
         if vllm_config.attention_config.hisparse_config is not None:
@@ -481,6 +487,28 @@ def build_attn_metadata(
     fast_prefill: FastPrefillBatchMetadata | None = None,
     req_idx: np.ndarray | None = None,
 ) -> dict[str, Any]:
+    # 【PagedAttention 元数据按组构建与跨层复用】：
+    # 1. 遍历每个 KVCacheGroup，组装后端无关的通用元数据 CommonAttentionMetadata
+    #    （包含变长前缀和 query_start_loc、上下文长度 seq_lens、页表 block_table_tensor 与物理写槽位 slot_mapping）。
+    # 2. 对每个 AttentionGroup 仅调用一次底层后端（如 FlashAttention / FlashInfer / MLA）的 MetadataBuilder，
+    #    生成算子调度所需的 tile/split 计划，然后将其复用到该组内的所有 Transformer 层（attn_metadata[layer_name]），
+    #    避免几十层网络逐层重复构建完全相同的 Attention 元数据。
+    #
+    # 【Sample：返回值 attn_metadata 字典长什么样？】
+    # - 场景 A：同构标准模型（如 32 层 Llama-3-8B，只有 1 个 KVCacheGroup / 1 个 AttentionGroup）：
+    #     builder.build(...) 只执行 1 次，产出同一个 FlashAttentionMetadata 实例 meta_0，字典内 32 个键全部指向该实例引用：
+    #     {
+    #         "model.layers.0.self_attn.attn":  meta_0,
+    #         "model.layers.1.self_attn.attn":  meta_0,  # 与第 0 层零开销共享同一份 scheduler_metadata / block_table！
+    #         ...
+    #         "model.layers.31.self_attn.attn": meta_0,
+    #     }
+    # - 场景 B：异构混合注意力模型（如局部滑动窗口 SWA + 全局 Full Attention 交替，拥有 2 个 KVCacheGroup）：
+    #     {
+    #         "model.layers.0.self_attn.attn": meta_swa,   # 绑定 SWA 专属页表 block_tables[0]（已回收滑窗外旧块）
+    #         "model.layers.1.self_attn.attn": meta_full,  # 绑定全局页表 block_tables[1]（保留全量历史块）
+    #         ...
+    #     }
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]

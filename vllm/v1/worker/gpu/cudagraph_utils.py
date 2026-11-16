@@ -70,7 +70,30 @@ class AttentionState(NamedTuple):
 @dataclass(frozen=True)
 class BatchExecutionDescriptor:
     """Describes the shape of the batch and CG mode to run; this is used to make shape
-    matches between the capture and runtime."""
+    matches between the capture and runtime.
+
+    【中文详解与 Sample（假设预设捕获档位 cudagraph_capture_sizes = [1, 2, 4, 8, 16, 32, ..., 512]）】：
+    用来唯一标识一个 CUDA Graph 捕获档位或运行时执行形态的不可变描述符：
+    1. 纯 Decode 批次（如 5 个常规 Decode 请求，共 5 个 token，`uniform_token_count = 1`）：
+       -> 命中整图模式（FULL），向上对齐到 8：
+          BatchExecutionDescriptor(
+              cg_mode=CUDAGraphMode.FULL, num_tokens=8, num_reqs=8, uniform_token_count=1
+          )
+          （注意：FULL 图连 Attention 一起录制，因此 `num_tokens` 和 `num_reqs` 都填充到 8，
+          多出的 3 个假请求在 `seq_lens[5:8]` 中被置为 0，Attention 算子会自动空转跳过。）
+    2. 混合 Prefill + Decode 批次（如前述 3 个请求 `[3, 1, 8]` 共 12 个 token）：
+       -> 命中分段图模式（PIECEWISE），仅将 `num_tokens` 向上对齐到 16，`num_reqs` 保持 `None`：
+          BatchExecutionDescriptor(
+              cg_mode=CUDAGraphMode.PIECEWISE, num_tokens=16, num_reqs=None, uniform_token_count=None
+          )
+          （注意：稠密 Linear/MLP/MoE 子图按 16 个 token 重放 CUDA Graph；遇到 Attention 断点时切回 Eager，
+          直接按真实的 `num_reqs = 3, num_actual_tokens = 12` 运行，无需填充假请求！）
+    3. 超长 Prefill 批次（如 2048 个 token，超过最大捕获阈值 512）：
+       -> 回退纯 Eager 模式（NONE），零填充直接执行：
+          BatchExecutionDescriptor(
+              cg_mode=CUDAGraphMode.NONE, num_tokens=2048, num_reqs=None
+          )
+    """
 
     cg_mode: CUDAGraphMode
     num_tokens: int
@@ -148,6 +171,16 @@ def has_compiled_submodule(model: nn.Module) -> bool:
 
 
 class CudaGraphManager:
+    """V2 CUDA Graph 捕获与运行时分发管理器（支持 FULL、PIECEWISE 及混合 FULL_AND_PIECEWISE 模式）。
+
+    核心机制：
+    - FULL 模式：将整网（含 Attention 算子）录制进单个 CUDAGraph，适用于纯 Decode（或投机验证）批次，
+      CPU 发射开销最低，但要求将 num_tokens 和 num_reqs 对齐填充到预设捕获档位。
+    - PIECEWISE 模式：配合 torch.compile（或 BreakableCUDAGraph）以动态形状的 Attention 为断点切分子图，
+      非 Attention 的稠密线性层/MLP/MoE 走图重放，Attention 走 Eager 执行，从而支持任意混合 Prefill+Decode 批次且无需填充请求数。
+    - _candidates 预计算表：在初始化时按 (num_tokens, active_loras) 预生成优先级候选列表，使每步 dispatch() 达到 O(1) 查表开销。
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -450,6 +483,8 @@ class CudaGraphManager:
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
             # activations so FULL activations should fit in already allocated
             # buffers in the graph pool.
+            # 先按 token 数从大到小捕获 PIECEWISE 图，再捕获 FULL 图，两者共享同一个 CUDA Graph Memory Pool，
+            # 让小尺寸 FULL 图直接复用大尺寸图已开辟的激活显存池，显著降低多档位图捕获的总显存开销。
             for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
                 if mode not in self._capture_descs:
                     continue
@@ -536,6 +571,8 @@ class CudaGraphManager:
         num_ubatches: int = 1,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
+        # 运行时按当前批次实际 (num_tokens, num_reqs, 是否纯均匀 Decode) 匹配最小兼容捕获档位；
+        # 若超出最大捕获尺寸或不满足约束，则回退为 CUDAGraphMode.NONE（Eager / torch.compile 执行）。
         effective_loras = self._resolve_effective_loras(num_active_loras)
         key = (num_tokens, effective_loras)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:

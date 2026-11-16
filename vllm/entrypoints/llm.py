@@ -338,6 +338,10 @@ class LLM(
         configure_logging_if_needed(engine_args.create_logging_config())
         log_non_default_args(engine_args)
 
+        # [离线推理主路径 - 初始化]
+        # LLM 是离线批量推理的顶层入口，底层封装同步版 V1 LLMEngine。
+        # LLMEngine 内部会创建 Renderer(分词/多模态预处理)、InputProcessor、
+        # OutputProcessor 以及 EngineCoreClient（默认通过 InprocClient 或子进程驱动 EngineCore）。
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
         )
@@ -469,6 +473,27 @@ class LLM(
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
+        # [离线推理主路径 Step 1]
+        # 调用 OfflineInferenceMixin._run_completion：
+        # 1) _add_completion_requests: 通过 Renderer 将原始 Prompt 转为 EngineInput(含 token_ids/多模态特征)，
+        #    再逐条调用 LLMEngine.add_request 送入 EngineCore 等待队列；
+        # 2) _run_engine: 循环调用 LLMEngine.step() 驱动调度与前向推理，直到所有请求完成。
+        #
+        # 【Sample：离线批量推理的输入与最终输出长什么样？】
+        # - 输入：
+        #     prompts = ["Hello, my name is", "The capital of France is"]
+        #     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=16)
+        # - 返回值 `list[RequestOutput]`（按输入顺序对齐，且因为离线模式采用 FINAL_ONLY，每个请求仅在生成结束时组装一次完整文本）：
+        #     [
+        #         RequestOutput(
+        #             request_id="0",
+        #             prompt="Hello, my name is",
+        #             prompt_token_ids=[128000, 9906, 11, 856, 836, 374],
+        #             outputs=[CompletionOutput(index=0, text=" Alice!", token_ids=[30591, 0], finish_reason="stop")],
+        #             finished=True,
+        #         ),
+        #         RequestOutput(request_id="1", prompt="The capital of France is", outputs=[...], finished=True),
+        #     ]
         return self._run_completion(
             prompts=prompts,
             params=sampling_params,

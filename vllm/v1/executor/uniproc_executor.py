@@ -30,6 +30,14 @@ logger = init_logger(__name__)
 
 
 class AsyncOutputFuture(Future):
+    """包装 AsyncModelRunnerOutput 的延迟求值 Future。
+
+    在单进程执行器（UniProcExecutor）中，GPU ModelRunner 提交完前向传播与采样 kernel、
+    并在独立拷贝流上发起异步 D2H 拷贝后会立即返回 AsyncModelRunnerOutput。
+    将其包装为 Future 后，EngineCore 可在调用 future.result() 同步等待 CUDA Event 之前，
+    先并行执行 CPU 侧工作（或异步调度下一轮 step），从而实现 CPU/GPU 流水重叠。
+    """
+
     def __init__(self, async_output: AsyncModelRunnerOutput, single_value: bool):
         self.async_output = async_output
         self.single_value = single_value
@@ -49,6 +57,12 @@ class AsyncOutputFuture(Future):
 
 
 class UniProcExecutor(Executor):
+    """单进程执行器（默认用于 TP=1, PP=1 单卡场景）。
+
+    直接在 EngineCore 所在进程内实例化并持有单个驱动 Worker（GPUWorker），
+    省去了 MultiprocExecutor 的跨进程共享内存广播与序列化开销。
+    """
+
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
         self.driver_worker = WorkerWrapperBase(rpc_rank=0)

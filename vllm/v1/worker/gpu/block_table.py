@@ -15,6 +15,37 @@ from vllm.v1.worker.gpu.buffer_utils import (
 
 
 class BlockTables:
+    """GPU 常驻的 Paged KV Cache 块表与物理槽位映射（slot_mapping）管理器。
+
+    - block_tables：按 KV Cache Group 维护全量活跃请求的块表 [max_num_reqs, max_num_blocks]，
+      每步仅增量追加新分配的 block_id（append_block_ids + apply_staged_writes）。
+    - input_block_tables / slot_mappings：固定显存地址的前向输入缓冲区；每步通过两个 Triton kernel
+      （gather_block_tables 与 compute_slot_mappings）按本批请求的 idx_mapping 收集块表行，
+      并将每个 token 的逻辑位置映射为物理 KV 槽位号（block_id * block_size + block_offset）。
+
+    Sample（假设单 KV Cache Group，`block_size = 16`，承接 InputBatch 的 3 请求混合批次 `idx_mapping = [4, 1, 9]`）：
+        1. 常驻块表 `block_tables[0]`（shape `[max_num_reqs, max_num_blocks]`）中相关槽位：
+           - slot 4 (req_B, seq_len=13): `[8, 0, 0, ...]`     （1 个物理块：block 8）
+           - slot 1 (req_A, seq_len=22): `[5, 12, 0, ...]`    （2 个物理块：block 5 存 0..15，block 12 存 16..31）
+           - slot 9 (req_C, seq_len=24): `[3, 19, 0, ...]`    （block 3 为命中的前缀缓存块 0..15，block 19 为新分配块 16..31）
+
+        2. `gather_block_tables` 按本批顺序收集出的 `input_block_tables[0][:3]`（供 Attention 读取历史 KV）：
+           tensor([
+               [ 8,  0,  0, ...],   # batch_idx 0 (req_B)
+               [ 5, 12,  0, ...],   # batch_idx 1 (req_A)
+               [ 3, 19,  0, ...],   # batch_idx 2 (req_C)
+           ], dtype=torch.int32)
+
+        3. `compute_slot_mappings` 为本批每个输入 token 算出的物理 KV 写入槽位 `slot_mappings[0, :16]`
+           （计算公式：`physical_slot = block_table[pos // 16] * 16 + (pos % 16)`；Padding 位置填 `PAD_SLOT_ID = -1`）：
+           - req_B (`pos = [10, 11, 12]`, `block = 8`): `8*16 + [10,11,12]` -> `[138, 139, 140]`
+           - req_A (`pos = [21]`,         `block = 12`): `12*16 + 5`        -> `[197]`
+           - req_C (`pos = [16..23]`,     `block = 19`): `19*16 + [0..7]`   -> `[304, 305, 306, 307, 308, 309, 310, 311]`
+           - Graph Padding (`idx = [12..15]`):                              -> `[-1, -1, -1, -1]`（算子见 -1 自动跳过写 KV！）
+           最终 `slot_mappings`（shape `[1, 16]`）=
+               tensor([[138, 139, 140, 197, 304, 305, 306, 307, 308, 309, 310, 311, -1, -1, -1, -1]])
+    """
+
     # Set by the elastic EP warmup so KV writes land in the null block.
     redirect_writes_to_null_block = False
 

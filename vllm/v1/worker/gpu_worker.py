@@ -447,6 +447,11 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Init device")
     def init_device(self):
+        # 【GPU Worker 设备初始化关键流程】：
+        # 1. 绑定当前 Worker 对应的物理 GPU（cuda:<visible_device_index>）。
+        # 2. 在记录初始显存快照前先初始化 NCCL 分布式通信组（TP/PP/DP/EP）与 cuBLAS/cuBLASLt 句柄，
+        #    把这些底层库固定占用的显存计入基线，避免后续计算 KV Cache 可用空间时发生 OOM。
+        # 3. 拍摄初始显存快照（init_snapshot），并实例化 ModelRunner（默认启用 V2 GPUModelRunner）。
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
@@ -576,6 +581,8 @@ class Worker(WorkerBase):
 
     def _make_model_runner(self) -> "GPUModelRunner":
         """Construct the platform's model runner; subclasses override this."""
+        # 默认使用模块化重构后的 V2 GPUModelRunner（vllm/v1/worker/gpu/model_runner.py），
+        # 其特点是将请求状态常驻 GPU 显存并用 Triton kernel 构造输入，大幅降低 CPU 开销。
         if self.use_v2_model_runner:
             if self.vllm_config.is_mm_encoder_only:
                 from vllm.v1.worker.mm_encoder_model_runner import (
@@ -689,6 +696,11 @@ class Worker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
+        # 【KV Cache 显存容量探测】：
+        # 使用最大批处理 token 数（max_num_batched_tokens）构造假输入跑一次完整前向传播（profile_run），
+        # 实测模型权重之外的峰值激活值（Activation）、MoE/算子临时 Workspace 以及 CUDA Graph 预估显存，
+        # 最终按公式：requested_memory - non_kv_cache_memory - cudagraph_memory_estimate
+        # 算出可安全分配给 Paged KV Cache 的字节数返回给 EngineCore。
         with (
             memory_profiling(
                 self.init_snapshot,
@@ -868,6 +880,8 @@ class Worker(WorkerBase):
     @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        # 根据 EngineCore 汇总所有 Worker 可用显存后算出的统一 KVCacheConfig（含最终 num_blocks），
+        # 初始化 KV Transfer Connector（若开启 P/D 分离或远端缓存），并在 GPU 上分配物理 KV Cache 张量并绑定到各 Attention 层。
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
         self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
@@ -941,6 +955,11 @@ class Worker(WorkerBase):
             return self._compile_or_warm_up_model()
 
     def _compile_or_warm_up_model(self) -> CompilationTimes:
+        # 【模型编译预热与 CUDA Graph 捕获】：
+        # 1. 对不在 CUDA Graph 捕获尺寸内的大尺寸 batch（如 chunked prefill 上限）触发 torch.compile 编译预热。
+        # 2. 预热底层算子与 JIT kernel（确保临时 Workspace 在图捕获前扩容到位，避免捕获后指针失效）。
+        # 3. 若未开启 enforce_eager，调用 model_runner.capture_model() 按预设 batch/token 档位录制 CUDA Graph。
+        # 4. 调用 freeze_gc_heap() 冻结静态对象堆（权重、KV Cache、CUDA Graph），防止在线推理期间 Python GC 扫描引发延迟毛刺。
         warmup_sizes: list[int] = []
 
         if (
@@ -1330,6 +1349,8 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        # 两阶段执行模式的第二阶段：接收 EngineCore 在 CPU 侧算好的结构化输出语法掩码（grammar_output），
+        # 对上一阶段 execute_model 暂存的隐状态/Logits 应用掩码并完成 Token 采样。
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
@@ -1337,6 +1358,23 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # 【Worker 单步前向入口】：
+        # 1. 流水线并行（PP）接收：若当前不是首个 PP Stage，发起非阻塞 irecv_tensor_dict 接收上一级传来的激活张量。
+        # 2. 模型执行：委托 model_runner.execute_model 完成输入准备、模型前向计算（及无需语法掩码时的直接采样）。
+        #    - 若为最后一个 PP Stage：直接返回 ModelRunnerOutput / AsyncModelRunnerOutput，
+        #      或者在需要等待结构化输出 GrammarOutput 时返回 None（延后到 sample_tokens 执行采样）。
+        # 3. 流水线并行（PP）发送：若非最后一个 PP Stage，返回的是 IntermediateTensors，
+        #    通过非阻塞 isend_tensor_dict 发往下一级 PP Stage，并在下一轮 step 开头 wait 保护发送缓冲区。
+        #
+        # 【Sample：PP 跨级传递的 IntermediateTensors 长什么样？（假设总调度 token 数 = 12，hidden_size = 4096）】
+        # - PP Stage 0 执行完第 0..15 层 Transformer 后，output 为：
+        #     IntermediateTensors(tensors={
+        #         "hidden_states": Tensor(shape=[12, 4096], dtype=torch.bfloat16, device="cuda:0"),
+        #         "residual":      Tensor(shape=[12, 4096], dtype=torch.bfloat16, device="cuda:0"),
+        #     })
+        # - 若同时开启 TP=2，isend_tensor_dict(..., all_gather_group=tp_group) 会自动沿 token 维切半
+        #   （每个 TP rank 仅通过 P2P 发送 [6, 4096]），对端 PP Stage 1 的 irecv_tensor_dict 收到后再
+        #   All-Gather 还原回完整的 [12, 4096] 封装为 AsyncIntermediateTensors 喂给第 16..31 层！
         # Wait for the previous step's sends so this forward pass cannot
         # overwrite buffers they are still reading.
         if self._pp_send_work:

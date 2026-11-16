@@ -39,6 +39,29 @@ else:
 
 @dataclass
 class NewRequestData:
+    """首次被调度（或 V2 下抢占后重新恢复）的请求完整元数据，发往 Worker 用于注册常驻槽位。
+
+    特别注意 `block_ids: tuple[list[int], ...]` 为什么是外层 tuple 套内层 list：
+    - 外层 tuple 的下标对应 **KV Cache Group**（例如标准 Llama/Qwen 只有 1 个全注意力组，外层长度为 1；
+      而 Gemma-3 / Jamba 等混合架构同时含 Full Attention 组与 Sliding Window / Mamba 组，外层长度为 2+）；
+    - 内层 `list[int]` 才是该请求在该 KV Cache Group 下按序分配到的物理块号列表。
+
+    典型实例（Sample，假设 block_size=16，Prompt 长 40，前 16 个 token 命中 Prefix Cache 块 3，本步先做 8 个 token 的 Chunked Prefill 新分了块 19）：
+    ```python
+    NewRequestData(
+        req_id="req_C",
+        prompt_token_ids=[128000, 791, ..., 432],  # 长度 40 的原始 Prompt
+        prefill_token_ids=[128000, 791, ..., 432], # V2 专用：正常等于 prompt_token_ids；若曾生成过 5 个 token 后被抢占重算，则长度为 45 (prompt + 已生成 output)
+        mm_features=[],
+        sampling_params=SamplingParams(temperature=0.7, max_tokens=256),
+        pooling_params=None,
+        block_ids=([3, 19],),                      # 单 KV 组模型为 1 元 tuple；双组混合模型形如 ([3, 19], [7, 22])
+        num_computed_tokens=16,                    # 前 16 个 token (块 3) 已命中缓存无需重算，Worker 将从 index=16 开始算
+        lora_request=None,
+    )
+    ```
+    """
+
     req_id: str
     prompt_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec]
@@ -136,6 +159,26 @@ class NewRequestData:
 
 @dataclass
 class CachedRequestData:
+    """已在 Worker 显存中建好档案的老请求增量更新包（采用 Struct-of-Arrays 列式存储，最小化序列化体积）。
+
+    无需再传庞大的 prompt_token_ids 或 SamplingParams！同下标 `i` 对应同一条老请求：
+    典型实例（Sample，包含两条正在 Decode 的老请求 `req_A` 与 `req_B`，block_size=16）：
+    ```python
+    CachedRequestData(
+        req_ids=["req_A", "req_B"],
+        resumed_req_ids=set(),
+        new_token_ids=[],                          # 非 PP 模式恒为空列表（Worker 自己知道上一步刚采样出了什么 token！）
+        all_token_ids={},
+        new_block_ids=[
+            None,                                  # req_A: num_computed=21，第 22 个 token 仍装得进已有的第 2 个物理块 (16..31)，无需新块！
+            ([25],),                               # req_B: 刚跨过 16 的整数倍边界，本步为第 0 个 KV Cache Group 新追加了物理块 25
+        ],
+        num_computed_tokens=[21, 16],              # 调度本步前各自已完成的 KV token 数（含对上一步投机解码拒绝回滚后的修正值）
+        num_output_tokens=[2, 5],                  # 已生成的 output token 数（等于 0 说明仍处于长 Prompt 的后续 Chunked Prefill 分片）
+    )
+    ```
+    """
+
     req_ids: list[str]
     # For request ids not in resumed_req_ids, new_block_ids will be appended to
     # the request's block IDs. For those in the set, new_block_ids will be used as the
@@ -230,6 +273,40 @@ class KVConnectorBlockState:
 
 @dataclass
 class SchedulerOutput:
+    """Scheduler.schedule() 每步产出的核心调度指令包，经 Executor 广播给所有 GPU Worker。
+
+    一次典型的 Continuous Batching 混合批次实例长这样（Sample）：
+    假设本步同时包含：
+      - `req_A`：普通 Decode 老请求（算 1 个新 token）
+      - `req_B`：带投机解码的 Decode 老请求（1 个上步采样 token + 2 个草稿 token = 共算 3 个 token）
+      - `req_C`：首次准入的新请求（Prompt 长 40，命中缓存 16，本步分片 Prefill 算 8 个 token）
+      - `req_prev`：上一步刚遇到 EOS 结束的请求，本步顺带通知 Worker 释放其槽位
+    ```python
+    SchedulerOutput(
+        scheduled_new_reqs=[NewRequestData(req_id="req_C", num_computed_tokens=16, block_ids=([3, 19],), ...)],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=["req_A", "req_B"],
+            new_block_ids=[None, ([25],)],
+            num_computed_tokens=[21, 10],
+            num_output_tokens=[2, 5], ...
+        ),
+        num_scheduled_tokens={                     # 每条请求本步实际送入模型 forward 的 token 数量
+            "req_A": 1,
+            "req_B": 3,                            # 1 (bonus/target) + 2 (drafts)
+            "req_C": 8,                            # Chunked Prefill 本步分片大小
+        },
+        total_num_scheduled_tokens=12,             # 1 + 3 + 8 = 12（决定 GPU 扁平化 input_ids 的总长度）
+        scheduled_spec_decode_tokens={
+            "req_B": [502, 503],                   # 仅含带草稿 token 的请求；普通请求不入字典
+        },
+        scheduled_encoder_inputs={},               # 若 req_C 含第 0 张图片需在本步跑 ViT，则为 {"req_C": [0]}
+        finished_req_ids={"req_prev"},             # 通知 Worker 从 RequestState 槽位表中清理 req_prev
+        preempted_req_ids=set(),                   # 本步因显存不足被抢占踢回 waiting 的请求 ID
+        new_block_ids_to_zero=None,                # 混合/FP8 KV 模型需要预先清零的新分配物理块 ID 列表
+    )
+    ```
+    """
+
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
     # need to re-send it every scheduling step.
@@ -340,6 +417,20 @@ class SchedulerOutput:
 
 @dataclass
 class GrammarOutput:
+    """结构化输出（JSON Schema / Regex / EBNF）的词表位图掩码载荷，在 sample_tokens 阶段送入 GPU。
+
+    典型实例（Sample，假设词表大小 vocab_size=128000，每 32 个 token 压入 1 个 int32，即每行 128000 / 32 = 4000 个 int32）：
+    ```python
+    GrammarOutput(
+        structured_output_request_ids=["req_A"],
+        # shape = [num_grammar_reqs * mask_stride, ceil(vocab_size / 32)]，例如 (1, 4000), dtype=int32
+        # 其中第 j 个 bit 为 1 表示允许采样对应 token，为 0 表示非法（将在 GPU 上被置为 -inf）
+        grammar_bitmask=array([[0b000...1010, ...]], dtype=int32),
+        num_acceptable_drafts=[0],
+    )
+    ```
+    """
+
     # ids of structured output requests.
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.

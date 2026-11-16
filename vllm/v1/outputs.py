@@ -32,6 +32,35 @@ else:
 
 
 class LogprobsLists(NamedTuple):
+    """序列化回传给 EngineCore（CPU 进程）的扁平化对数概率列表。
+
+    由于投机解码（Speculative Decoding）中不同请求单步生成的 token 数可能不同，
+    这里将所有请求生成的各个位置的 top-k logprobs 沿第 0 维拼成紧凑二维数组，
+    并用前缀和 `cu_num_generated_tokens` 记录每个请求对应的行区间。
+
+    Sample（假设 batch 有 3 个请求：`req_B` 投机生成 2 个 token，`req_A` 生成 1 个 token，
+    `req_C` 仍在 Chunked Prefill 生成 0 个 token；用户设置 `logprobs=2`，故每行保留
+    `max_num_logprobs + 1 = 3` 列，即「采样出的 token 自身 + top-2 候选 token」）：
+        LogprobsLists(
+            # shape = (3, 3) -> 共 2 + 1 + 0 = 3 个生成位置
+            logprob_token_ids=np.array([
+                [502, 502, 610],   # req_B 第 0 个生成位置：采样出 502，top-2 为 502, 610
+                [999, 503, 999],   # req_B 第 1 个生成位置：采样出 999，top-2 为 503, 999
+                [777, 777, 128],   # req_A 第 0 个生成位置：采样出 777，top-2 为 777, 128
+            ], dtype=np.int32),
+            logprobs=np.array([
+                [-0.05, -0.05, -3.20],
+                [-0.80, -0.65, -0.80],
+                [-0.01, -0.01, -4.90],
+            ], dtype=np.float32),
+            # 每个生成位置实际采样出的 token 在词表概率降序中的名次（0-based）
+            sampled_token_ranks=np.array([0, 1, 0], dtype=np.int32),
+            # 请求级行偏移前缀和：[0, 2, 3, 3]
+            # -> req_B 取 [0:2]，req_A 取 [2:3]，req_C 取 [3:3]（空）
+            cu_num_generated_tokens=[0, 2, 3, 3],
+        )
+    """
+
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprob_token_ids: np.ndarray
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
@@ -203,6 +232,24 @@ PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor 
 
 @dataclass
 class SamplerOutput:
+    """GPU 采样器（Sampler / RejectionSampler）的原始设备端输出张量。
+
+    Sample（接上例 3 个请求，最大单步生成数 `max_num_generated_tokens = 3`，即 2 个草稿 + 1 个 bonus）：
+        SamplerOutput(
+            # shape = [3, 3]（驻留在 GPU 上，不足处用 PLACEHOLDER_TOKEN_ID = -1 填充）：
+            # - row 0 (req_B): 接受草稿 502，拒绝第 2 个草稿并重采样出 999 -> [502, 999, -1]
+            # - row 1 (req_A): 常规 Decode 采样出 777                      -> [777,  -1, -1]
+            # - row 2 (req_C): Chunked Prefill 尚未扫完 prompt，虽算出末位 token 404，
+            #                  但配合 num_sampled=[2, 1, 0] 在 D2H 解包时会被截断为空 []
+            sampled_token_ids=tensor([
+                [502, 999,  -1],
+                [777,  -1,  -1],
+                [404,  -1,  -1],
+            ], device='cuda:0', dtype=torch.int32),
+            logprobs_tensors=LogprobsTensors(...)  # 若全部请求均未开启 logprobs 则为 None
+        )
+    """
+
     # [num_reqs, max_num_generated_tokens]
     # Different requests can have different number of generated tokens.
     # All requests are padded to max_num_generated_tokens.
@@ -265,6 +312,29 @@ class ECConnectorOutput:
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
 class ModelRunnerOutput:
+    """Worker（仅 output_rank 进程）经共享内存 / ZMQ IPC 返回给 EngineCore Scheduler 的单步执行结果。
+
+    注意：为了避免跨进程序列化 `torch.Tensor` 触发高昂的 CUDA IPC 句柄交换开销，
+    `sampled_token_ids` 已在 Worker 的 `AsyncOutput.get_output()` 中通过异步 D2H 拷贝
+    并按 `num_sampled` 截断为纯 Python 嵌套列表 `list[list[int]]`。
+
+    Sample（3 请求混合批次 `[req_B(投机), req_A(常规Decode), req_C(Chunked Prefill未完)]`）：
+        ModelRunnerOutput(
+            req_ids=["req_B", "req_A", "req_C"],
+            req_id_to_index={"req_B": 0, "req_A": 1, "req_C": 2},
+            # 变长嵌套列表：每个子列表仅包含本步真正采纳的有效新 token
+            sampled_token_ids=[
+                [502, 999],  # req_B：投机解码本步产出 2 个新 token
+                [777],       # req_A：常规 Decode 本步产出 1 个新 token
+                [],          # req_C：Chunked Prefill 尚未读完整个 prompt，本步产出 0 个 token
+            ],
+            logprobs=LogprobsLists(...),       # 未请求 logprobs 时为 None
+            prompt_logprobs_dict={},           # 仅当请求开启 prompt_logprobs 时填充对应 req_id
+            pooler_output=None,                # 仅 Embedding / Rerank 等 Pooling 模型非空
+            kv_connector_output=None,          # P/D 分离场景下回报异步 KV 发送/接收完成的 req_id 集合
+        )
+    """
+
     # [num_reqs]
     req_ids: list[str]
     # req_id -> index

@@ -140,6 +140,38 @@ class EngineCoreRequest(
     omit_defaults=True,  # type: ignore[call-arg]
     gc=False,
 ):  # type: ignore[call-arg]
+    """前端 InputProcessor 构造并经 ZMQ 发送给后端 EngineCore 的标准化请求载荷（使用 msgspec 紧凑数组序列化）。
+
+    多模态 + 文本混合请求的典型实例长这样（Sample）：
+    ```python
+    EngineCoreRequest(
+        request_id="cmpl-8f3a-0",                  # 内部唯一 ID（若并行采样 n=2，会裂变为 ...-0, ...-1）
+        external_req_id="cmpl-8f3a",               # 用户侧原始 request_id，用于外部 abort 映射
+        prompt_token_ids=[128000, 3923, 374,       # 已展开多模态占位符后的完整 Token 序列
+                          151655, ..., 151655,     # 连续 256 个 <image_pad> 占位 token (offset=3, length=256)
+                          198, 264, 5629],
+        mm_features=[
+            MultiModalFeatureSpec(
+                data={"pixel_values": Tensor([1, 3, 448, 448])},
+                modality="image",
+                identifier="9e107d9d...",          # 图像内容哈希（mm_hash），用于 EncoderCache 跨请求复用视觉特征
+                mm_position=PlaceholderRange(offset=3, length=256),
+            )
+        ],
+        sampling_params=SamplingParams(
+            temperature=0.7, top_p=0.95, max_tokens=512,
+            stop_token_ids={128001, 128009},       # 已由 InputProcessor 补全 tokenizer/generation_config 停止符
+        ),
+        pooling_params=None,                       # 生成任务为 None；Embedding/Rerank 任务则填 PoolingParams
+        arrival_time=1730188900.42,
+        lora_request=None,                         # 若挂载 LoRA 则为 LoRARequest(lora_name="sql-lora", lora_int_id=2, ...)
+        cache_salt=None,                           # 多租户隔离盐值（混入 Prefix Cache 第一个块的哈希防侧信道探测）
+        data_parallel_rank=None,
+        client_index=0,                            # 多 API Server 实例扩展时，标记回包应路由给第几个前端进程
+    )
+    ```
+    """
+
     request_id: str
     prompt_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec] | None
@@ -293,6 +325,36 @@ class EngineCoreOutputs(
     omit_defaults=True,  # type: ignore[call-arg]
     gc=False,
 ):  # type: ignore[call-arg]
+    """后端 EngineCore 每执行完一个 step 后，按 client_index 分组发回前端 OutputProcessor 的批量增量结果。
+
+    注意：这里只传轻量级 token ID 整数（不含解码文本），文本解码留在前端进程异步完成。
+    一次混合 Batch Step 产出的典型实例长这样（Sample）：
+    ```python
+    EngineCoreOutputs(
+        engine_index=0,                            # DP 模式下标识来自哪个 EngineCore rank
+        outputs=[
+            # 1) 普通 Decode 请求：本步正常生成 1 个新 token，尚未结束
+            EngineCoreOutput(
+                request_id="req_A",
+                new_token_ids=[912],
+                finish_reason=None,
+            ),
+            # 2) 开启投机解码 (Speculative Decoding) 的请求：单步同时接受了草稿 token 502 并采样出 EOS 128009，直接完结
+            EngineCoreOutput(
+                request_id="req_B",
+                new_token_ids=[502, 128009],
+                finish_reason=FinishReason.STOP,   # 枚举值 0 ("stop")
+                stop_reason=128009,
+            ),
+            # 注：同批中若还有一条处于 Chunked Prefill 中间分片的 "req_C"（Prompt 尚未算完，无新生成 token），
+            # 则根本不会出现在 outputs 列表中，从而节省 IPC 带宽与前端遍历开销！
+        ],
+        finished_requests={"req_B"},
+        scheduler_stats=SchedulerStats(num_running_reqs=2, num_waiting_reqs=0, kv_cache_usage=0.34, ...),
+    )
+    ```
+    """
+
     # NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 

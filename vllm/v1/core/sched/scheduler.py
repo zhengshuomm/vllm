@@ -697,6 +697,14 @@ class Scheduler(SchedulerInterface):
         return max(num_new_tokens, 0)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        # [V1 统一调度器核心 - Scheduler.schedule]
+        # 核心设计思想：V1 彻底取消了 V0 时代独立的“Prefill 阶段”与“Decode 阶段”划分。
+        # 每条请求仅维护两个核心游标：
+        #   - num_computed_tokens: 已经算完 KV Cache 的 token 数；
+        #   - num_tokens_with_spec: 当前需要计算的目标总长度 (prompt + 已生成 output + 待验证 draft tokens)。
+        # 每次 schedule() 只做一件事：在全局 token_budget (max_num_batched_tokens) 和空闲 KV Block 约束下，
+        # 为请求分配本步要推进的 num_new_tokens，从而天然统一了 Chunked Prefill、Decode、Prefix Caching 和 Spec Decode。
+        # 调度分两大阶段：先保正在跑的 RUNNING 请求（不足时触发抢占 Preemption），有剩余预算再准入 WAITING 新请求。
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -790,6 +798,13 @@ class Scheduler(SchedulerInterface):
         ):
             defer_prefills = True
 
+        # [阶段一：优先调度已在运行的请求 (self.running)]
+        # 对每条 running 请求：
+        #   - 普通 Decode 请求: num_new_tokens 通常为 1（开启 Spec Decode 时为 1 + num_spec_tokens）；
+        #   - 未完成的长 Prompt (Chunked Prefill): num_new_tokens 为剩余未算完的 prompt tokens（受 token_budget 截断）；
+        #   - 随后向 KVCacheManager 申请本步新增 token 所需的物理 KV Blocks；
+        #   - 若空闲 KV Blocks 不足，则循环从 running 队尾（FCFS 最低优先级）弹出请求执行抢占 (_preempt_request)，
+        #     释放其占用的 KV Blocks 并退回 waiting 队列头部（V1 采用 Recompute 重算式抢占，无 CPU swap 开销）。
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -1046,6 +1061,14 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        # [阶段二：在未发生抢占且预算充足时，准入等待队列请求 (self.waiting)]
+        # 准入流程：
+        # 1) 检查并发槽位上限 (max_num_active_reqs)、结构化输出语法是否编译就绪、LoRA 数量上限；
+        # 2) Prefix Caching 查表 (_get_local_prefix_cache_hit): 用请求预计算的 block_hashes 查找已缓存的物理 KV Blocks，
+        #    若配置了 KVConnector (如 P/D 分离或远端缓存)，还会继续查询远端可复用的 KV 长度；
+        # 3) 计算除缓存命中部分外本步需要实际前向计算的 num_new_tokens（受 token_budget 截断，即 Chunked Prefill）；
+        # 4) 调用 kv_cache_manager.allocate_slots 挂载命中的缓存块（增加引用计数）并分配新物理块；
+        # 5) 分配成功后移入 self.running，状态切换为 RUNNING。
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
@@ -1638,6 +1661,10 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs
         ) <= len(self.running)
 
+        # [阶段三：构造极简跨进程载荷 SchedulerOutput]
+        # 为降低 EngineCore -> Worker 的跨进程序列化开销，V1 采用增量状态同步：
+        # - scheduled_new_reqs (NewRequestData): 首次调度的请求（V2 下含抢占恢复请求），携带完整 token_ids、采样参数和初始 block_ids；
+        # - scheduled_cached_reqs (CachedRequestData): 已驻留在 Worker 内存中的老请求，仅发送增量分配的 new_block_ids 与进度游标！
         # Construct the scheduler output.
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
@@ -1843,6 +1870,10 @@ class Scheduler(SchedulerInterface):
         self.reset_preempted_req_ids.add(request.request_id)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
+        # [调度后乐观推进游标]
+        # 在 GPU 真正跑完前，就先把 request.num_computed_tokens 加上本步调度的 token 数：
+        # 这样在异步调度或流水线并行(PP)下，下一步 schedule() 立刻就能基于新位置继续调度下一个 chunk/step；
+        # 若后续 Speculative Decoding 有 draft token 被拒绝，再在 update_from_output() 中回滚扣减。
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
         # 1. The scheduler_output of the current step has to include the
@@ -2262,6 +2293,36 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # [模型执行后状态回写 - Scheduler.update_from_output]
+        # 拿到 Worker 返回的采样结果 ModelRunnerOutput 后，逐条请求更新调度状态：
+        # 1) Speculative Decoding 校准: 根据实际接受的 token 数，将拒绝的 draft token 从 num_computed_tokens 回滚；
+        # 2) 追加新生成的 token (_update_request_with_output):
+        #    - 若该请求本步只是 Chunked Prefill 的中间分片，generated_token_ids 为空 `[]`，不产出对外输出；
+        #    - 否则将新 token 追加到 request，并检查是否命中停止条件（EOS token / stop_token_ids / max_tokens / max_model_len）；
+        # 3) 若请求已完成 (stopped): 调用 _free_request 释放其占用的所有 KV Cache Blocks（归还 BlockPool 供后续请求复用），
+        #    并记录到 self.finished_req_ids，在下一步 SchedulerOutput 中通知 Worker 清理其 GPU 侧持久状态；
+        # 4) 组装按前端 client_index 分组的 dict[int, EngineCoreOutputs] 返回给 EngineCore。
+        #
+        # 【输入 ModelRunnerOutput -> 游标校准与输出 EngineCoreOutputs 完整 Sample】：
+        #   承接上一步混合批次 ["req_B"(投机验证 3 tok), "req_A"(普通 Decode 1 tok), "req_C"(Chunked Prefill 中间片 8 tok)]：
+        #   输入 model_runner_output:
+        #     ModelRunnerOutput(
+        #         req_ids=["req_B", "req_A", "req_C"],
+        #         sampled_token_ids=[
+        #             [502, 777],  # req_B: 草稿 [502, 503] 中第 1 个 502 被接受，第 2 个 503 被拒绝并重采样出 777（共得 2 个 token，拒绝 1 个）
+        #             [912],       # req_A: 普通 Decode 采样出 1 个 token 912
+        #             [],          # req_C: Prompt 共 40，本步算完 16+8=24 < 40，仍在 Prefill 分片中，故为空列表！
+        #         ], ...
+        #     )
+        #   本函数内部状态变化:
+        #     - req_B: 调度后乐观推进到了 num_computed_tokens = 10 + 3 = 13；因拒绝了 1 个草稿，此处回滚扣 1 修正为 12，追加 [502, 777]；
+        #     - req_A: num_computed_tokens 保持 21 + 1 = 22，追加 [912]；
+        #     - req_C: num_computed_tokens 保持 16 + 8 = 24，无新生成 token，继续留在 self.running 等下一步算剩余 16 个 prompt token；
+        #   返回 dict[client_index, EngineCoreOutputs]:
+        #     {0: EngineCoreOutputs(outputs=[
+        #         EngineCoreOutput(request_id="req_B", new_token_ids=[502, 777]),
+        #         EngineCoreOutput(request_id="req_A", new_token_ids=[912]),
+        #     ])}  # 注意 req_C 因无新 token 不会出现在对外 outputs 中！
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict

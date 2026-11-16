@@ -21,6 +21,12 @@ if TYPE_CHECKING:
 
 
 class InputBuffers:
+    """预分配的静态地址模型输入缓冲区（供每次前向传播与 CUDA Graph 捕获/重放复用）。
+
+    由于 FULL CUDA Graph 在录制时会固化输入张量的显存虚拟地址，所有每步变化的模型输入
+    （input_ids、positions、query_start_loc、seq_lens）都必须原地写入这些固定缓冲区切片中。
+    """
+
     def __init__(self, max_num_reqs: int, max_num_tokens: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
@@ -41,6 +47,41 @@ class InputBuffers:
 
 @dataclass
 class InputBatch:
+    """V2 ModelRunner 单步前向的紧凑 1D Ragged（无 Batch 维拼接）输入描述符。
+
+    在 Continuous Batching（连续批处理）中，不同请求在同一 step 调度的 token 数完全不同
+    （例如常规 Decode=1、投机 Decode=1+K、Chunked Prefill=几百上千），因此 vLLM 不会构造
+    `[batch_size, seq_len]` 的二维填充张量，而是把所有请求的输入 token 拍平成一维连续数组
+    `input_ids` / `positions`，再用前缀和 `query_start_loc` 标记每个请求的起止边界！
+
+    Sample（承接 RequestState 中的 3 请求混合批次，经 `sort_batch_req_ids` 按 `[投机Decode, 常规Decode, Prefill]`
+    排序后，总有效 `num_tokens = 12`，假设 PIECEWISE CUDA Graph 向上对齐到桶大小 `num_tokens_after_padding = 16`）：
+        req_ids               = ["req_B", "req_A", "req_C"]    # num_reqs = 3, num_reqs_after_padding = 3
+        idx_mapping           = [4, 1, 9]                      # batch_idx -> RequestState 固定槽位号
+        num_scheduled_tokens  = [3, 1, 8]                      # 每个请求本步调度的 query token 数
+        num_draft_tokens_per_req = [2, 0, 0]                   # num_draft_tokens = 2
+        query_start_loc       = [0, 3, 4, 12]                  # 长度 num_reqs + 1：
+                                                               #   req_B -> [0:3], req_A -> [3:4], req_C -> [4:12]
+        seq_lens              = [13, 22, 24]                   # 本步算完后的总 KV 上下文长度（num_computed + scheduled）：
+                                                               #   req_B=10+3, req_A=21+1, req_C=16+8
+
+        # 拍平后的 1D Ragged 模型输入张量（长度均为 num_tokens_after_padding = 16，末尾 4 个为 Graph Padding）：
+        # token 下标:   0    1    2  |   3  |   4    5    6    7    8    9   10   11 | 12 13 14 15 (pad)
+        # 所属请求  : <---- req_B --->|req_A |<--------------- req_C ---------------->|<-- CUDA Graph Pad ->
+        input_ids   = [501, 502, 503,  888,  101, 102, 103, 104, 105, 106, 107, 108,   0, 0, 0, 0]
+        positions   = [ 10,  11,  12,   21,   16,  17,  18,  19,  20,  21,  22,  23,   0, 0, 0, 0]
+        is_padding  = [  F,   F,   F,    F,    F,   F,   F,   F,   F,   F,   F,   F,   T, T, T, T]
+
+        # 稀疏 Logits 抽取索引（仅在需要生成/验证新 token 的位置计算词表投影，跳过 Prefill 中间 token 与 Padding！）：
+        # - req_B 需要验证 2 个草稿 + 产出 1 个 bonus -> 共 3 行 logits（对应下标 0, 1, 2）
+        # - req_A 常规 Decode 产出 1 个新 token       -> 共 1 行 logits（对应下标 3）
+        # - req_C Prefill 仅最后一个位置设 1 行占位   -> 共 1 行 logits（对应下标 11）
+        logits_indices       = [0, 1, 2, 3, 11]                # shape: [total_num_logits = 5]
+        cu_num_logits        = [0, 3, 4, 5]                    # 每个请求在 logits 张量中的行区间
+        expanded_idx_mapping = [4, 4, 4, 1, 9]                 # 每行 logits 对应的 RequestState 槽位号
+        expanded_local_pos   = [0, 1, 2, 0, 0]                 # 每行 logits 在各自请求内的局部偏移（供惩罚项/投机验证使用）
+    """
+
     # batch_idx -> req_id
     req_ids: list[str]
     num_reqs: int
@@ -335,6 +376,9 @@ def prepare_prefill_inputs(
     prefill_len: torch.Tensor,
     num_computed_tokens: torch.Tensor,
 ) -> None:
+    # 启动 Triton kernel：对处于 Prefill（含 Chunked Prefill）阶段的请求，
+    # 根据 idx_mapping 从 UVA/GPU 上的 all_token_ids[num_computed : num_computed + query_len]
+    # 直接并行搬运本步需要计算的 token 到静态缓冲区 input_ids 中。
     num_reqs = idx_mapping.shape[0]
     num_lookahead = next_prefill_tokens.shape[0]
     _prepare_prefill_inputs_kernel[(num_reqs,)](
@@ -397,6 +441,8 @@ def prepare_pos_seq_lens(
     pos: torch.Tensor,
     seq_lens: torch.Tensor,
 ) -> None:
+    # 启动 Triton kernel：在 GPU 上并行计算每个请求的总上下文长度 seq_lens = num_computed + query_len，
+    # 生成每个 token 的位置编码索引 positions，同时利用第 num_reqs 个额外线程块将多余槽位的 seq_lens 清零以适配 FULL CUDA Graph。
     num_reqs = idx_mapping.shape[0]
     # NOTE(woosuk): We do +1 because the last thread block is used
     # to pad unused seq_lens as 0 for full CUDA graphs.

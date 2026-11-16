@@ -397,6 +397,32 @@ class CommonAttentionMetadata:
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
 
     For many of the tensors we keep both GPU and CPU versions.
+
+    【中文详解与 Sample】：
+    各 Attention 后端（FlashAttention / FlashInfer / Triton / MLA）共享的批次级通用输入视图。
+    之所以同时保留 GPU 与 CPU 两份 `query_start_loc` / `seq_lens` 上界，是因为底层算子的
+    MetadataBuilder 往往需要在 CPU 侧计算 Tile 切分与 Split-KV 调度计划——直接读 CPU 副本即可避免
+    在推理热路径上触发阻塞式的 `cudaStreamSynchronize`（GPU -> CPU 同步）！
+
+    Sample（承接 3 请求混合批次 `[req_B(3 tok 投机), req_A(1 tok Decode), req_C(8 tok Prefill)]`，`block_size=16`）：
+        CommonAttentionMetadata(
+            query_start_loc     = tensor([0, 3, 4, 12], device='cuda:0', dtype=int32),
+            query_start_loc_cpu = tensor([0, 3, 4, 12], device='cpu',    dtype=int32),
+            seq_lens            = tensor([13, 22, 24],  device='cuda:0', dtype=int32),
+            num_reqs            = 3,
+            num_actual_tokens   = 12,   # 真实有效 token 总数（不含 CUDA Graph 尾部填充的 4 个 0）
+            max_query_len       = 8,    # max([3, 1, 8]) -> 决定 Q 维度的最大块切分
+            max_seq_len         = 24,   # max([13, 22, 24]) -> 决定 KV 维度的最大块切分
+            block_table_tensor  = tensor([
+                [ 8,  0],               # req_B 历史+当前 KV 所在物理块号
+                [ 5, 12],               # req_A 物理块号
+                [ 3, 19],               # req_C 物理块号（块 3 来自 Prefix Cache，块 19 为新分配）
+            ], device='cuda:0', dtype=int32),
+            slot_mapping        = tensor(
+                [138, 139, 140, 197, 304, 305, 306, 307, 308, 309, 310, 311, -1, -1, -1, -1],
+                device='cuda:0', dtype=int64,
+            ),
+        )
     """
 
     query_start_loc: torch.Tensor

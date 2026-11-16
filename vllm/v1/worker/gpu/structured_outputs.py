@@ -50,6 +50,18 @@ def grammar_invalid_drafts(
 
 
 class StructuredOutputsWorker:
+    """GPU 侧结构化输出掩码执行器：接收 CPU 端 xgrammar/llguidance 生成的紧凑位图（每 32 个词表 token 压缩为 1 个 int32），
+    通过独立 copy_stream 异步拷入显存，并用 Triton kernel 按位解包，将违反语法状态机的非法 token Logits 原地置为 -inf。
+
+    Sample（按位压缩与解包掩码示例，假设词表前 4 个 token 为 `0:"{"`, `1:"hello"`, `2:"["`, `3:"}"`）：
+    - 当前 JSON 语法状态机处于起始位置，仅允许输出 `"{"` (id=0) 或 `"["` (id=2)：
+      CPU 传来的 `grammar_bitmask` 第 0 个 `int32` 整数在二进制下为：
+          `0b0000...0000_0101`（十进制值为 `5`：bit 0 = 1 允许，bit 1 = 0 禁止，bit 2 = 1 允许，bit 3 = 0 禁止）
+    - `_apply_grammar_bitmask_kernel` 解包逻辑 `((packed_bitmask >> [0..31]) & 1) == 0`：
+      - 掩码前 `logits[:4]` = `[ 1.8,  4.2,  0.9,  2.5]`（原本最高分是违反 JSON 语法的 token 1 `"hello"`）
+      - 掩码后 `logits[:4]` = `[ 1.8, -inf,  0.9, -inf]`（所有 bit=0 的非法 token 被原地打成 `-inf`，保证采样 100% 合规！）
+    """
+
     def __init__(
         self,
         max_num_logits: int,

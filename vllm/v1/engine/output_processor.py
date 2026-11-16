@@ -68,6 +68,10 @@ class RequestOutputCollector:
 
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
+        # [流式吞吐优化 - 自动合并增量输出]
+        # 当后端 GPU 产出速度 > 前端 HTTP/SSE 消费速度时，若 self.output 尚未被取走，
+        # 在 DELTA 模式下直接通过 output.add(..., aggregate=True) 原地合并多个 step 的增量文本与 token，
+        # 既避免队列无限堆积，又减少高频协程唤醒开销。
         if self.output is None or isinstance(output, Exception):
             self.output = output
             self.ready.set()
@@ -752,6 +756,31 @@ class OutputProcessor:
         If you need to touch every element of the batch, do it from
         within the loop below.
         """
+        # [前端输出后处理主循环 - OutputProcessor.process_outputs]
+        # 这是前端进程唯一按 batch 遍历 EngineCoreOutput 的热路径函数（离线 LLMEngine 与在线 AsyncLLM 共用）：
+        # 1) 更新统计指标（TTFT、TPOT、Prefix Cache 命中数等）；
+        # 2) 调用 IncrementalDetokenizer 将新采样的 token_ids 增量解码为文本，并检测是否命中文本级 stop string
+        #    （若单步生成多个 token 如 Speculative Decoding，命中 stop string 后通过 _trim_surplus_tokens 截断多余尾部）；
+        # 3) 更新采样 logprobs / prompt logprobs；
+        # 4) 根据 output_kind (DELTA / CUMULATIVE / FINAL_ONLY) 构造 RequestOutput：
+        #    - AsyncLLM 模式: 推入该请求绑定的 RequestOutputCollector 唤醒上层协程；
+        #    - LLMEngine 模式: 收集到 request_outputs 列表直接返回给 step()；
+        # 5) 清理已完成请求的本地状态；若因前端命中文本 stop string 提前结束，记录到 reqs_to_abort 通知 EngineCore 释放 KV Cache。
+        #
+        # 【输入 -> 输出转换与 Stop String 截断 Sample】：
+        #   假设某流式请求设置了 stop=["Observation:"]，output_kind=DELTA，投机解码本步一次发回 3 个 token：
+        #   输入 engine_core_output:
+        #     EngineCoreOutput(request_id="req_1", new_token_ids=[312, 25, 198], finish_reason=None)
+        #     # 其中 token 312="Observation", 25=":", 198="\n"（后端只认 token ID，不知道前两个拼起来已触发文本 stop！）
+        #   本函数处理结果:
+        #     - Detokenizer 拼出 "Observation:\n"，检测到在 "Observation:" 处命中停止词，_trim_surplus_tokens 裁掉多余的 token 198；
+        #     - 产出的 RequestOutput (DELTA 模式仅含本步新增片段，且默认不包含 stop 词本身):
+        #       RequestOutput(
+        #           request_id="req_1", prompt="...", prompt_token_ids=[...],
+        #           outputs=[CompletionOutput(index=0, text="", token_ids=[312, 25], finish_reason="stop", stop_reason="Observation:")],
+        #           finished=True,
+        #       )
+        #     - 同时因为后端 EngineCore 此时还以为 "req_1" 未结束，将其加入返回的 reqs_to_abort=["req_1"]，立刻通知后端回收 KV Blocks！
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:

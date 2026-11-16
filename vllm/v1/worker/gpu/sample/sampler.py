@@ -40,6 +40,8 @@ from vllm.v1.worker.gpu.states import RequestState
 
 
 class Sampler:
+    """V2 GPU 采样器：负责 Logits 后处理流水线（偏置、惩罚项、温度、Top-K/Top-P/Min-P）、Token 采样及 Logprobs 计算。"""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -136,6 +138,21 @@ class Sampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
     ) -> SamplerOutput:
+        """执行非投机（每请求 1 行 Logits）的批量异构参数采样。
+
+        Sample（假设批次有 2 个常规请求：`req_A` 为贪心 `temp=0.0`，`req_C` 为 Chunked Prefill 未完 `seq_len=24 < prefill_len=40`）：
+        - 输入：
+            `logits`: shape `[2, 128256]`（每个请求仅传入最后 1 个位置的词表得分）
+            `input_batch.idx_mapping`: `[1, 9]`（用于在 GPU 常驻表 `sampling_states` 中按请求查找各自的 temp/top_p/seed）
+        - 处理与采样：
+            `self.sample(...)` 产出 `sampled = tensor([777, 404])`（shape `[2]`）
+            `get_num_sampled_and_rejected(...)` 检查 `seq_lens >= prefill_len`：
+              -> `req_A` (`22 >= 20`) 得 `1`；`req_C` (`24 < 40`) 未完成 Prefill 得 `0`！
+        - 输出 `SamplerOutput`（驻留 GPU，紧接着交由 `AsyncOutput` 异步 D2H 拷贝）：
+            `sampled_token_ids = tensor([[777], [404]])` (shape `[2, 1]`),
+            `num_sampled       = tensor([1, 0])`,
+            `num_rejected      = tensor([0, 0])`
+        """
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping = input_batch.idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
@@ -235,10 +252,13 @@ class Sampler:
         seq_lens_upper_bound_np: np.ndarray,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
+        # 快速路径：若本批所有请求均为纯贪心或默认参数（无需惩罚项、偏置、温度缩放、min_p 等处理），
+        # 直接跳过 FP32 拷贝及所有后处理 kernel，直接在原始精度 Logits 上采样。
         if not np.any(self.needs_logits_processing[idx_mapping_np]):
             return logits
 
         # Copy logits to a new FP32 tensor.
+        # 严格按不可交换顺序依次应用：logit_bias -> 重复/频率/存在惩罚(penalties) -> bad_words -> 自定义处理器 -> thinking_budget -> temperature -> min_p
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         ctx = LogitsContext(
@@ -336,6 +356,8 @@ class Sampler:
         has_topp_only_rows: bool,
         use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # 满足条件时优先调用 FlashInfer 融合 Top-K/Top-P 采样算子（无需显式排序整个词表）；
+        # 若批次内混有贪心请求（temp=0）、指定随机种子或需返回后处理 Logprobs，则走 apply_top_k_top_p + Triton gumbel_sample 统一路径。
         if use_fused_sampler:
             if self.use_flashinfer:
                 sampled = flashinfer_sample(processed_logits, top_k, top_p).to(

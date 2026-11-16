@@ -395,6 +395,29 @@ class InputProcessor:
         session_id: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
     ) -> EngineCoreRequest:
+        # [前端输入处理核心 - InputProcessor.process_inputs]
+        # 将用户态输入（EngineInput 或原始 Prompt）规范化为可跨进程序列化的 EngineCoreRequest：
+        # 1) 参数校验: 验证 SamplingParams / PoolingParams、LoRA 与 DP rank 合法性；
+        # 2) 分词与渲染: 若传入原始 Prompt，调用 Renderer 完成分词与多模态预处理；
+        # 3) 长度校验: 检查 prompt_token_ids / 多模态视觉 token 数是否超出 max_model_len 或 encoder cache；
+        # 4) 克隆并补全采样参数: 计算默认 max_tokens (= max_model_len - prompt_len)，注入 tokenizer 的 EOS/stop_token_ids；
+        # 5) 多模态特征展平: 将多模态特征按序列出现位置排序封装为 MultiModalFeatureSpec 列表（含用于缓存复用的 mm_hash）；
+        # 6) 组装返回 EngineCoreRequest，随后交由 EngineCoreClient 发往 EngineCore。
+        #
+        # 【输入 -> 输出转换 Sample】：
+        #   输入 prompt (EngineInput dict):
+        #     {"type": "token", "prompt_token_ids": [128000, 9906, 1917], "prompt": "Hello world"}
+        #   输入 params:
+        #     SamplingParams(temperature=0.8, max_tokens=None)  # 用户未显式指定 max_tokens 与 stop_token_ids
+        #   返回 EngineCoreRequest:
+        #     EngineCoreRequest(
+        #         request_id="chatcmpl-123",
+        #         prompt_token_ids=[128000, 9906, 1917],
+        #         mm_features=None,
+        #         sampling_params=SamplingParams(temperature=0.8, max_tokens=8189, stop_token_ids={128001, 128009}),
+        #         arrival_time=1730188900.12,
+        #         client_index=0,
+        #     )
         watermarking = self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
 
